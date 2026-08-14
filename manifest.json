@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "GoodsAudit",
+  "version": "1.7.42",
+  "description": "Аудит постингов на объекте.",
+  "action": {
+    "default_title": "GoodsAudit",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting",
+    "windows",
+    "alarms",
+    "offscreen",
+    "notifications"
+  ],
+  "host_permissions": ["https://returns.o3t.ru/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

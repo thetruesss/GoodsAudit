@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="ru" class="popup-booting">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoodsAudit</title>
+    <script src="popup-size-boot.js"></script>
+    <style>
+      html.popup-booting, html.popup-booting body {
+        background: #eef2f7 !important;
+      }
+      html.popup-booting .topbar,
+      html.popup-booting .wrap,
+      html.popup-booting .popup-resize-handle {
+        visibility: hidden !important;
+      }
+      #bootSplash {
+        position: fixed; inset: 0; z-index: 9999;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 10px; background: linear-gradient(160deg, #f2f5f9, #e8eef6 55%, #dfe8f4);
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: #001a34;
+        opacity: 1;
+        transition: opacity 0.32s ease;
+      }
+      #bootSplash.is-leaving {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #bootSplash .boot-splash__mark {
+        width: 67px; height: 67px;
+        background: transparent;
+        box-shadow: none;
+      }
+      #bootSplash .boot-splash__mark img {
+        display: block; width: 100%; height: 100%; object-fit: contain;
+      }
+      #bootSplash .boot-splash__title { font-size: 22px; font-weight: 700; }
+      #bootSplash .boot-splash__hint { font-size: 12px; color: #667685; margin-top: -18px; }
+      #bootSplash .boot-splash__loader {
+        scale: 1.55;
+        height: 50px;
+        width: 40px;
+        margin: 10px 0 2px;
+      }
+      #bootSplash .boot-splash__loader .box {
+        position: relative;
+        opacity: 0;
+        left: 10px;
+        
+        will-change: transform, opacity;
+        backface-visibility: hidden;
+      }
+      #bootSplash .boot-splash__loader .side-left {
+        position: absolute;
+        background-color: #0046d1;
+        width: 19px;
+        height: 5px;
+        transform: skew(0deg, -25deg);
+        top: 14px;
+        left: 10px;
+      }
+      #bootSplash .boot-splash__loader .side-right {
+        position: absolute;
+        background-color: #005bff;
+        width: 19px;
+        height: 5px;
+        transform: skew(0deg, 25deg);
+        top: 14px;
+        left: -9px;
+      }
+      #bootSplash .boot-splash__loader .side-top {
+        position: absolute;
+        background-color: #5fa8f5;
+        width: 20px;
+        height: 20px;
+        rotate: 45deg;
+        transform: skew(-20deg, -20deg);
+      }
+      
+      #bootSplash .boot-splash__loader .box-1 { animation: bootTowerFromLeft 4s infinite; }
+      #bootSplash .boot-splash__loader .box-2 { animation: bootTowerFromRight 4s infinite; animation-delay: 1s; }
+      #bootSplash .boot-splash__loader .box-3 { animation: bootTowerFromLeft 4s infinite; animation-delay: 2s; }
+      #bootSplash .boot-splash__loader .box-4 { animation: bootTowerFromRight 4s infinite; animation-delay: 3s; }
+      @keyframes bootTowerFromLeft {
+        0% { z-index: 20; opacity: 0; translate: -20px -6px; }
+        20% { z-index: 10; opacity: 1; translate: 0px 0px; }
+        40% { z-index: 9; translate: 0px 4px; }
+        60% { z-index: 8; translate: 0px 8px; }
+        80% { z-index: 7; opacity: 1; translate: 0px 12px; }
+        100% { z-index: 5; translate: 0px 30px; opacity: 0; }
+      }
+      @keyframes bootTowerFromRight {
+        0% { z-index: 20; opacity: 0; translate: 20px -6px; }
+        20% { z-index: 10; opacity: 1; translate: 0px 0px; }
+        40% { z-index: 9; translate: 0px 4px; }
+        60% { z-index: 8; translate: 0px 8px; }
+        80% { z-index: 7; opacity: 1; translate: 0px 12px; }
+        100% { z-index: 5; translate: 0px 30px; opacity: 0; }
+      }
+      html.popup-booting body.ui-gradient .topbar {
+        animation: none !important;
+      }
+    </style>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="ui-gradient">
+    <div id="bootSplash" class="boot-splash" aria-busy="true" aria-live="polite">
+      <div class="boot-splash__mark" aria-hidden="true">
+        <img src="icon-splash.png" alt="" width="67" height="67" />
+      </div>
+      <div class="boot-splash__title">GoodsAudit</div>
+      <div class="boot-splash__loader" aria-hidden="true">
+        <div class="box box-1">
+          <div class="side-left"></div>
+          <div class="side-right"></div>
+          <div class="side-top"></div>
+        </div>
+        <div class="box box-2">
+          <div class="side-left"></div>
+          <div class="side-right"></div>
+          <div class="side-top"></div>
+        </div>
+        <div class="box box-3">
+          <div class="side-left"></div>
+          <div class="side-right"></div>
+          <div class="side-top"></div>
+        </div>
+        <div class="box box-4">
+          <div class="side-left"></div>
+          <div class="side-right"></div>
+          <div class="side-top"></div>
+        </div>
+      </div>
+      <div class="boot-splash__hint">Загрузка…</div>
+    </div>
+    <div id="appToast" class="app-toast" hidden role="status" aria-live="polite"></div>
+    <header class="topbar">
+      <div class="brand">
+        <button id="brandLogo" type="button" class="btn-gear brand-mark" aria-label="GoodsAudit">
+          <span class="btn-gear__shadow" aria-hidden="true"></span>
+          <span class="btn-gear__edge" aria-hidden="true"></span>
+          <span class="btn-gear__front">
+            <img class="brand-mark-img" src="icon.png" alt="" />
+          </span>
+        </button>
+        <div class="brand-text">
+          <span class="brand-title">GoodsAudit</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a
+          id="btnHelpChannel"
+          class="btn-gear btn-help"
+          href="https://chatzone.o3t.ru/ozon/channels/goodsaudit"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Канал GoodsAudit в Chatzone"
+          title="Канал GoodsAudit в Chatzone"
+        >
+          <span class="btn-gear__shadow" aria-hidden="true"></span>
+          <span class="btn-gear__edge" aria-hidden="true"></span>
+          <span class="btn-gear__front">?</span>
+        </a>
+        <button
+          id="btnOpenSettings"
+          type="button"
+          class="btn-gear"
+          aria-label="Настройки"
+          aria-expanded="false"
+        >
+          <span class="btn-gear__shadow" aria-hidden="true"></span>
+          <span class="btn-gear__edge" aria-hidden="true"></span>
+          <span class="btn-gear__front">
+            <svg class="btn-gear-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.52-.4-1.08-.73-1.69-.98l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.61.25-1.17.59-1.69.98l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.52.4 1.08.73 1.69.98l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.61-.25 1.17-.59 1.69-.98l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"
+              />
+            </svg>
+          </span>
+        </button>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <div id="workArea">
+        <section class="card">
+          <div class="row-between row-tight">
+            <span class="h2">Исходник</span>
+            <div class="clear-actions">
+              <button id="clearSource" type="button" class="btn btn-ghost btn-sm">
+                Очистить ввод
+              </button>
+              <button
+                id="undoClearSource"
+                type="button"
+                class="btn-undo"
+                disabled
+                aria-label="Отменить очистку ввода"
+              >
+                <svg class="btn-undo-icon" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="source-segment" role="radiogroup" aria-label="Способ загрузки исходника">
+            <button
+              type="button"
+              id="sourceModeFileBtn"
+              class="source-segment__option is-active"
+              role="radio"
+              aria-checked="true"
+            >
+              <span class="source-segment__ico source-segment__ico--file" aria-hidden="true"></span>
+              <span class="source-segment__label">Файл Excel</span>
+            </button>
+            <button
+              type="button"
+              id="sourceModeTextBtn"
+              class="source-segment__option"
+              role="radio"
+              aria-checked="false"
+            >
+              <span class="source-segment__ico source-segment__ico--text" aria-hidden="true"></span>
+              <span class="source-segment__label">Вставка строк</span>
+            </button>
+          </div>
+          <div class="file-source">
+            <label for="sourceFile" class="btn btn-secondary file-pick-btn">
+              Выбрать файл(ы) исходника
+            </label>
+            <input
+              id="sourceFile"
+              type="file"
+              accept=".xls,.xlsx,.xlsm,.xlsb,.xltx,.xltm"
+              multiple
+              hidden
+            />
+          </div>
+          <div id="textSourceWrap" hidden>
+            <textarea id="sourceText" spellcheck="false"></textarea>
+          </div>
+          <div id="sourceHint" class="source-hint" aria-live="polite">
+            Файл не выбран. Поддерживаются XLS/XLSX/XLSM/XLSB/XLTX/XLTM.
+          </div>
+          <div id="fileLoadWrap" class="file-load-wrap" hidden>
+            <div class="file-load-head">
+              <span id="fileLoadStage">Подготовка…</span>
+              <span id="fileLoadPct">0%</span>
+            </div>
+            <div class="file-load-track">
+              <div id="fileLoadFill" class="file-load-fill"></div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="run" type="button" class="btn btn-primary btn-run">
+              Обработать
+            </button>
+            <button id="pause" type="button" class="btn btn-pause" disabled>
+              Пауза
+            </button>
+            <button id="stop" type="button" class="btn btn-stop" disabled>
+              Стоп
+            </button>
+          </div>
+
+          <div class="progress-wrap is-slot-reserved" id="progressWrap" hidden>
+            <div class="progress-meta">
+              <span id="progressLabel" class="progress-label">—</span>
+              <span id="progressCounts" class="muted"></span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill" id="progressFill"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-tight">
+          <div class="row-between">
+            <h2 class="h2">Результат</h2>
+            <div class="clear-actions">
+              <button
+                id="copyJobErrors"
+                type="button"
+                class="btn btn-ghost btn-sm"
+                disabled
+                title="Копирует только ID постингов с ошибками — можно сразу снова запустить обработку. Память ID не трогаем."
+              >
+                Копировать ошибки
+              </button>
+              <button id="clearJob" type="button" class="btn btn-ghost btn-sm">
+                Очистить результат
+              </button>
+              <button
+                id="undoClearJob"
+                type="button"
+                class="btn-undo"
+                disabled
+                aria-label="Отменить очистку результата"
+              >
+                <svg class="btn-undo-icon" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <pre id="status" class="status" aria-live="polite"></pre>
+          <div class="actions actions-copy actions-copy-split">
+            <button id="copyGt10k" type="button" class="btn btn-primary" disabled>
+              Копировать ≥
+            </button>
+            <button id="copyLt10k" type="button" class="btn btn-primary" disabled>
+              Копировать &lt;
+            </button>
+          </div>
+          <div class="actions actions-copy actions-copy-split actions-copy-extra">
+            <button id="copyVulnerable" type="button" class="btn btn-danger-solid" disabled>
+              Товары группы уязвимости
+            </button>
+            <button id="copyAllRows" type="button" class="btn btn-secondary" disabled>
+              Копировать всё
+            </button>
+          </div>
+          <div class="actions actions--single">
+            <button id="clearMem" type="button" class="btn btn-danger-outline">
+              Сбросить память ID
+            </button>
+          </div>
+          <div class="preview-block">
+            <div id="previewGeCaption" class="preview-caption"></div>
+            <pre id="previewGe" class="preview"></pre>
+          </div>
+          <div class="preview-block">
+            <div id="previewLtCaption" class="preview-caption"></div>
+            <pre id="previewLt" class="preview"></pre>
+          </div>
+          <div class="preview-block">
+            <div id="previewVulnerableCaption" class="preview-caption"></div>
+            <pre id="previewVulnerable" class="preview"></pre>
+          </div>
+        </section>
+      </div>
+
+      <div id="panelSettings" class="settings-panel" role="region" aria-label="Настройки" hidden>
+        <section class="card">
+          <h2 class="h2 settings-heading">Настройки</h2>
+
+          <div class="settings-tabs" role="tablist" aria-label="Разделы настроек">
+            <button
+              id="settingsTabGeneral"
+              type="button"
+              class="settings-tab is-active"
+              role="tab"
+              aria-selected="true"
+              aria-controls="settingsPanelGeneral"
+            >
+              Общие
+            </button>
+            <button
+              id="settingsTabLayout"
+              type="button"
+              class="settings-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="settingsPanelLayout"
+            >
+              Колонки таблицы
+            </button>
+          </div>
+
+          <div id="settingsPanelGeneral" class="settings-tab-panel" role="tabpanel" aria-labelledby="settingsTabGeneral">
+            <div class="controls settings-controls">
+              <label class="field field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Потоки (вкладки)</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: потоки"
+                    data-tip="Сколько вкладок в отдельном окне. Больше — быстрее, но тяжелее для браузера."
+                    >?</span>
+                </span>
+                <input
+                  id="threads"
+                  type="number"
+                  min="1"
+                  max="12"
+                  value="5"
+                />
+              </label>
+              <label class="field field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Пауза, мс</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: пауза"
+                    data-tip="Пауза между карточками в одном потоке. Меньше — быстрее, больше — спокойнее для сайта."
+                    >?</span>
+                </span>
+                <input id="delayMs" type="number" min="0" max="5000" value="750" />
+              </label>
+              <label class="field field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">После загрузки, мс</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: после загрузки"
+                    data-tip="Ждём после открытия карточки. Подними, если часто пустые данные."
+                    >?</span>
+                </span>
+                <input id="settleMs" type="number" min="0" max="10000" value="750" />
+              </label>
+              <label id="priceThresholdField" class="field field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Порог цены, ₽</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: порог цены"
+                    data-tip=""
+                    >?</span>
+                </span>
+                <input id="priceThreshold" type="number" min="0" step="1" value="10000" />
+              </label>
+              <label id="minPriceThresholdField" class="field field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Нижний порог, ₽</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: нижний порог"
+                    data-tip="Ниже этой цены строки не попадут ни в ≥, ни в <."
+                    >?</span>
+                </span>
+                <input id="minPriceThreshold" type="number" min="0" step="1" value="0" />
+              </label>
+              <label id="vulnerableMinPriceThresholdField" class="field field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Минимальная цена товаров группы риска, ₽</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: минимальная цена товаров группы риска"
+                    data-tip="Товары группы риска (по кейвордам уязвимости) с ценой ниже этого порога не попадут в предпросмотр и копирование. 0 — без ограничения по цене."
+                    >?</span>
+                </span>
+                <input id="vulnerableMinPriceThreshold" type="number" min="0" step="1" value="0" />
+              </label>
+              <div class="field field-toggle">
+                <span class="field-label">Стиль расширения</span>
+                <div class="field-toggle-row">
+                  <span class="field-toggle-text">Переливающийся градиент</span>
+                  <label class="ui-switch">
+                    <input id="uiGradientToggle" class="checkbox" type="checkbox" checked />
+                    <div class="ui-switch-track" aria-hidden="true"></div>
+                  </label>
+                </div>
+              </div>
+              <div class="field field-toggle field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Агрессивный режим</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: агрессивный режим"
+                    data-tip="Выводит окно парсинга на передний план и активирует рабочие вкладки. Без режима работа та же, но окно остаётся в фоне и не перехватывает фокус. Нужно, если Chrome троттлит фоновые вкладки."
+                    >?</span>
+                </span>
+                <div class="field-toggle-row">
+                  <span class="field-toggle-text">Форсировать вкладки и окно парсинга</span>
+                  <label class="ui-switch">
+                    <input id="aggressiveModeToggle" class="checkbox" type="checkbox" />
+                    <div class="ui-switch-track" aria-hidden="true"></div>
+                  </label>
+                </div>
+              </div>
+              <div class="field field-toggle field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Память ID</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: отсекать ID из памяти"
+                    data-tip="Если включено, ID которые уже есть в памяти не попадают в предпросмотр и копирование. Выключение сразу возвращает их в предпросмотр и копирование без перезапуска обработки."
+                    >?</span>
+                </span>
+                <div class="field-toggle-row">
+                  <span class="field-toggle-text">Отсекать ID которые уже в памяти</span>
+                  <label class="ui-switch">
+                    <input id="excludeMemoryIdsToggle" class="checkbox" type="checkbox" />
+                    <div class="ui-switch-track" aria-hidden="true"></div>
+                  </label>
+                </div>
+              </div>
+              <div class="field field-toggle field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Вывод гиперссылок</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: вывод гиперссылок"
+                    data-tip="При копировании в Excel колонки «ID отправления» и «Отправление» становятся формулами =ГИПЕРССЫЛКА. Для каждой колонки можно выбрать сервис: ASC, Touch или Hub."
+                    >?</span>
+                </span>
+                <div class="field-toggle-row">
+                  <span class="field-toggle-text">Включить гиперссылки при копировании</span>
+                  <label class="ui-switch">
+                    <input id="hyperlinksToggle" class="checkbox" type="checkbox" checked />
+                    <div class="ui-switch-track" aria-hidden="true"></div>
+                  </label>
+                </div>
+                <div id="hyperlinkServicesWrap" class="hyperlink-services" hidden>
+                  <div class="hyperlink-service-item">
+                    <label class="hyperlink-service-label" for="hyperlinkServiceArticleId">ID отправления</label>
+                    <select id="hyperlinkServiceArticleId" class="select-oz hyperlink-service-select" aria-label="Сервис гиперссылки для ID отправления">
+                      <option value="hub">Hub</option>
+                      <option value="asc">ASC</option>
+                      <option value="touch">Touch</option>
+                    </select>
+                  </div>
+                  <div class="hyperlink-service-item">
+                    <label class="hyperlink-service-label" for="hyperlinkServiceShipment">Отправление</label>
+                    <select id="hyperlinkServiceShipment" class="select-oz hyperlink-service-select" aria-label="Сервис гиперссылки для отправления">
+                      <option value="hub">Hub</option>
+                      <option value="asc">ASC</option>
+                      <option value="touch">Touch</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div class="field">
+                <span class="field-label">Список опер. складов</span>
+                <div id="opsWarehousesList" class="ops-list"></div>
+                <div class="actions">
+                  <button id="btnAddOpsWarehouse" type="button" class="btn btn-secondary btn-sm">
+                    + Добавить
+                  </button>
+                </div>
+              </div>
+              <div class="settings-layout-io">
+                <button id="btnExportTableColumns" type="button" class="btn btn-secondary btn-sm btn-with-icon">
+                  <svg
+                    class="btn-with-icon__svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M5 8c0-2.2 3.1-4 7-4s7 1.8 7 4" />
+                    <path d="M12 20V11" />
+                    <path d="M8 15l4-4 4 4" />
+                  </svg>
+                  Экспорт колонок таблицы
+                </button>
+                <button id="btnImportTableColumns" type="button" class="btn btn-secondary btn-sm btn-with-icon">
+                  <svg
+                    class="btn-with-icon__svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M5 16c0 2.2 3.1 4 7 4s7-1.8 7-4" />
+                    <path d="M12 4v9" />
+                    <path d="M8 9l4 4 4-4" />
+                  </svg>
+                  Импорт колонок таблицы
+                </button>
+                <input id="tableColumnsImportFile" type="file" accept=".json,application/json" hidden />
+              </div>
+              <div class="settings-cache-actions">
+                <button id="btnClearAllCache" type="button" class="btn btn-danger-outline btn-sm">
+                  Очистить весь кэш
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="settingsPanelLayout" class="settings-tab-panel" role="tabpanel" aria-labelledby="settingsTabLayout" hidden>
+            <div class="layout-tab-toolbar">
+              <div class="layout-deleted-wrap" id="layoutDeletedWrap">
+                <button
+                  id="btnLayoutDeletedColumns"
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  disabled
+                  aria-expanded="false"
+                  aria-haspopup="true"
+                  aria-controls="layoutDeletedPopover"
+                >
+                  Удалённые колонки…
+                </button>
+                <div
+                  id="layoutDeletedPopover"
+                  class="layout-deleted-popover"
+                  hidden
+                  role="menu"
+                  aria-label="Удалённые колонки"
+                ></div>
+              </div>
+            </div>
+            <p class="settings-tab-hint">
+              Поля — это вывод заготовленных, главных параметров.<br />
+              Столбец исходника — вывод информации из выбранного столбца, если проверка шла по файлу Excel.<br />
+              (Пусто) — в буфер обмена запишется пустая ячейка.
+            </p>
+            <div id="settingsLayoutScroll" class="settings-layout-scroll">
+              <div class="layout-config">
+                <div class="layout-group">
+                  <h3 id="layoutGeTitle" class="layout-title"></h3>
+                  <div id="layoutGeGrid" class="layout-constructor"></div>
+                </div>
+                <div class="layout-group">
+                  <h3 id="layoutLtTitle" class="layout-title"></h3>
+                  <div id="layoutLtGrid" class="layout-constructor"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="popupResizeHandle" class="popup-resize-handle" aria-hidden="true"></div>
+    <div id="secretKeywordsModal" class="secret-modal-overlay" hidden>
+      <section
+        class="secret-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="secretKeywordsTitle"
+      >
+        <header class="secret-modal-header">
+          <h3 id="secretKeywordsTitle" class="h2">Секретные настройки</h3>
+          <button id="btnCloseSecretKeywords" type="button" class="btn btn-ghost btn-sm">Закрыть</button>
+        </header>
+        <p class="secret-modal-subtitle">
+          Кейворды группы уязвимости. Совпадение ищется по номенклатуре отдельными словами.
+        </p>
+        <div class="secret-modal-search">
+          <input
+            id="secretKeywordsSearch"
+            type="text"
+            placeholder="Поиск кейворда..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div class="secret-modal-toolbar">
+          <button id="btnAddSecretKeyword" type="button" class="btn btn-secondary btn-sm">
+            + Добавить кейворд
+          </button>
+        </div>
+        <div id="secretKeywordsList" class="secret-keywords-list"></div>
+      </section>
+    </div>
+
+    <script src="source-cache.js"></script>
+    <script src="source-parse.js"></script>
+    <script src="popup-main.js"></script>
+  </body>
+</html>
