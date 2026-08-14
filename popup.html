@@ -435,24 +435,25 @@
                       tabindex="0"
                       role="button"
                       aria-label="Справка: потоки"
-                      data-tip="Авто — расширение само подбирает число потоков под ваш ПК и меняет его во время обработки. Вручную — фиксированное число вкладок: больше — быстрее, но тяжелее для браузера."
+                      data-tip="Авто — расширение само подбирает число потоков под ваш ПК и меняет его во время обработки. Вручную — задайте своё число вкладок (1–25): больше — быстрее, но тяжелее для браузера."
                       >?</span>
                   </span>
-                  <select id="threadsChoice" class="select-oz" aria-label="Число потоков">
-                    <option value="auto">Авто (рекомендуется)</option>
-                    <option value="1">1</option>
-                    <option value="2">2</option>
-                    <option value="3">3</option>
-                    <option value="4">4</option>
-                    <option value="5">5</option>
-                    <option value="6">6</option>
-                    <option value="7">7</option>
-                    <option value="8">8</option>
-                    <option value="9">9</option>
-                    <option value="10">10</option>
-                    <option value="11">11</option>
-                    <option value="12">12</option>
-                  </select>
+                  <div class="threads-row">
+                    <select id="threadsMode" class="select-oz threads-mode-select" aria-label="Режим потоков">
+                      <option value="auto">Авто (рекомендуется)</option>
+                      <option value="manual">Вручную</option>
+                    </select>
+                    <input
+                      id="threadsManual"
+                      type="number"
+                      min="1"
+                      max="25"
+                      step="1"
+                      value="5"
+                      hidden
+                      aria-label="Число потоков (от 1 до 25)"
+                    />
+                  </div>
                 </label>
               </section>
 

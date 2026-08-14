@@ -443,6 +443,7 @@ let outputPrefs = {
   layoutLt: DEFAULT_LAYOUT_LT.map((fieldId) => ({ type: "field", fieldId })),
   opsWarehouses: [],
   threadsChoice: "auto",
+  lastManualThreads: 5,
   uiGradient: true,
   aggressiveMode: false,
   excludeMemoryIds: false,
@@ -1598,12 +1599,21 @@ function getEffectiveUpperThreshold() {
   return Math.max(getPriceThreshold(), getMinPriceThreshold());
 }
 
+const MANUAL_THREADS_MAX = 25;
+const MANUAL_THREADS_DEFAULT = 5;
+
 function normalizeThreadsChoice(value) {
   const raw = String(value ?? "auto").trim().toLowerCase();
   if (raw === "auto" || raw === "" || raw === "0") return "auto";
   const n = Math.floor(Number(raw));
   if (!Number.isFinite(n) || n < 1) return "auto";
-  return String(Math.min(12, n));
+  return String(Math.min(MANUAL_THREADS_MAX, n));
+}
+
+function normalizeManualThreadsValue(value, fallback = MANUAL_THREADS_DEFAULT) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(MANUAL_THREADS_MAX, n);
 }
 
 function getManualThreadsCount() {
@@ -1611,11 +1621,21 @@ function getManualThreadsCount() {
   return choice === "auto" ? 0 : Number(choice);
 }
 
+function getLastManualThreads() {
+  return normalizeManualThreadsValue(outputPrefs.lastManualThreads, MANUAL_THREADS_DEFAULT);
+}
+
 function applyThreadsChoiceToDom() {
-  const select = $("threadsChoice");
-  if (!select) return;
+  const modeSelect = $("threadsMode");
+  const manualInput = $("threadsManual");
+  if (!modeSelect || !manualInput) return;
   const choice = normalizeThreadsChoice(outputPrefs.threadsChoice);
-  if (select.value !== choice) select.value = choice;
+  const isManual = choice !== "auto";
+  const mode = isManual ? "manual" : "auto";
+  if (modeSelect.value !== mode) modeSelect.value = mode;
+  const count = isManual ? Number(choice) : getLastManualThreads();
+  if (manualInput.value !== String(count)) manualInput.value = String(count);
+  manualInput.hidden = !isManual;
 }
 
 function getOpsWarehousesList(opts = {}) {
@@ -3578,6 +3598,9 @@ async function applySettingsPreset(preset) {
     : [];
   if (!outputPrefs.opsWarehouses.length) outputPrefs.opsWarehouses = [""];
   outputPrefs.threadsChoice = normalizeThreadsChoice(d.threadsChoice);
+  if (outputPrefs.threadsChoice !== "auto") {
+    outputPrefs.lastManualThreads = Number(outputPrefs.threadsChoice);
+  }
   outputPrefs.excludeMemoryIds = d.excludeMemoryIds === true;
   outputPrefs.hyperlinksEnabled = d.hyperlinksEnabled !== false;
   outputPrefs.hyperlinkServiceArticleId = normalizeHyperlinkService(d.hyperlinkServiceArticleId);
@@ -3718,6 +3741,7 @@ function collectPopupPrefs() {
     prefsLayoutSchemaVersion: LAYOUT_PREFS_SCHEMA_VERSION,
     selectedPresetId: String(selectedPresetId || ""),
     threadsChoice: normalizeThreadsChoice(outputPrefs.threadsChoice),
+    lastManualThreads: getLastManualThreads(),
     priceThreshold: $("priceThreshold")?.value ?? String(DEFAULT_PRICE_THRESHOLD),
     minPriceThreshold: $("minPriceThreshold")?.value ?? String(DEFAULT_MIN_PRICE_THRESHOLD),
     vulnerableMinPriceThreshold:
@@ -3759,6 +3783,10 @@ async function restorePopupPrefs() {
   const raw = prefs || {};
   selectedPresetId = typeof raw.selectedPresetId === "string" ? raw.selectedPresetId : "";
   outputPrefs.threadsChoice = normalizeThreadsChoice(raw.threadsChoice);
+  outputPrefs.lastManualThreads = normalizeManualThreadsValue(
+    raw.lastManualThreads,
+    outputPrefs.threadsChoice === "auto" ? MANUAL_THREADS_DEFAULT : Number(outputPrefs.threadsChoice)
+  );
   const restoredPriceThreshold = Number(raw.priceThreshold);
   outputPrefs.priceThreshold =
     Number.isFinite(restoredPriceThreshold) && restoredPriceThreshold >= 0
@@ -4954,8 +4982,33 @@ $("clearMem").addEventListener("click", async () => {
   showAppToast("Память ID сброшена.", 3200);
 });
 
-$("threadsChoice")?.addEventListener("change", async () => {
-  outputPrefs.threadsChoice = normalizeThreadsChoice($("threadsChoice")?.value);
+$("threadsMode")?.addEventListener("change", async () => {
+  const manual = $("threadsMode")?.value === "manual";
+  outputPrefs.threadsChoice = manual ? String(getLastManualThreads()) : "auto";
+  applyThreadsChoiceToDom();
+  if (manual) {
+    const input = $("threadsManual");
+    if (input) {
+      input.focus();
+      if (typeof input.select === "function") input.select();
+    }
+  }
+  await savePopupPrefs();
+});
+
+$("threadsManual")?.addEventListener("input", () => {
+  const raw = $("threadsManual")?.value ?? "";
+  if (String(raw).trim() === "") return;
+  const count = normalizeManualThreadsValue(raw, getLastManualThreads());
+  outputPrefs.threadsChoice = String(count);
+  outputPrefs.lastManualThreads = count;
+  schedulePopupPrefsSave(180);
+});
+
+$("threadsManual")?.addEventListener("blur", async () => {
+  const count = normalizeManualThreadsValue($("threadsManual")?.value, getLastManualThreads());
+  outputPrefs.threadsChoice = String(count);
+  outputPrefs.lastManualThreads = count;
   applyThreadsChoiceToDom();
   await savePopupPrefs();
 });
@@ -5058,6 +5111,7 @@ function resetExtensionStateToFactory() {
     layoutLt: [],
     opsWarehouses: [""],
     threadsChoice: "auto",
+    lastManualThreads: 5,
     uiGradient: true,
     aggressiveMode: false,
     excludeMemoryIds: false,

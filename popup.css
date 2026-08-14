@@ -636,6 +636,27 @@ body.ui-gradient .topbar {
   background: var(--oz-danger-soft);
 }
 
+/* --- Потоки: авто / ручной ввод --- */
+.threads-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.threads-mode-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.threads-row input[type="number"] {
+  width: 92px;
+  flex: 0 0 92px;
+}
+
+.threads-row input[hidden] {
+  display: none !important;
+}
+
 /* --- Секции настроек --- */
 .settings-group {
   margin: 0 0 6px;
