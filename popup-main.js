@@ -119,7 +119,7 @@ function askAppInput({
 
     const input = document.createElement("input");
     input.type = inputType === "password" ? "password" : "text";
-    input.className = "captcha-modal-input";
+    input.className = "captcha-modal-input captcha-modal-input--text";
     input.autocomplete = "off";
     input.spellcheck = false;
     input.placeholder = String(placeholder || "");
@@ -475,6 +475,15 @@ let vulnerabilityKeywordMatcherCacheKey = "";
 let vulnerabilityKeywordMatcherEntries = [];
 let secretKeywordsModalOpen = false;
 let secretKeywordsSearchQuery = "";
+let settingsPresets = [];
+let selectedPresetId = "";
+let activeSourceTextCache = { mode: "", raw: null, value: "" };
+let lastPersistedSource = {
+  fileText: null,
+  fileName: null,
+  fileNamesKey: null,
+  textInput: null,
+};
 
 function cloneForUndo(value) {
   if (value == null) return null;
@@ -1666,10 +1675,10 @@ function filterRowsByOpsWarehouse(rows) {
   return list.filter((row) => hasMatchingOpsWarehouse(row));
 }
 
-function createDeleteButton({ ariaLabel = "Удалить", disabled = false } = {}) {
+function createDeleteButton({ ariaLabel = "Удалить", disabled = false, small = false } = {}) {
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.className = "deleteButton";
+  btn.className = small ? "deleteButton deleteButton--sm" : "deleteButton";
   btn.setAttribute("aria-label", ariaLabel);
   btn.disabled = Boolean(disabled);
   btn.innerHTML =
@@ -2187,24 +2196,34 @@ function rowsAll(job) {
   return ensureRowBands(job).all;
 }
 const getActiveSourceText = () => {
-  const raw = sourceState.mode === "file" ? sourceState.file.text : String(sourceState.textInput || "");
+  const mode = sourceState.mode === "file" ? "file" : "text";
+  const raw = mode === "file" ? sourceState.file.text : String(sourceState.textInput || "");
+  // Мемоизация: render() дёргает эту функцию очень часто, а разбор больших
+  // исходников (сотни тысяч строк) на каждый вызов подвешивал попап.
+  if (activeSourceTextCache.mode === mode && activeSourceTextCache.raw === raw) {
+    return activeSourceTextCache.value;
+  }
   const splitRecords =
     typeof globalThis.__returnsSplitCsvRecords === "function"
       ? globalThis.__returnsSplitCsvRecords
       : null;
+  let value;
   if (splitRecords) {
-    return splitRecords(raw).join("\n").trim();
+    value = splitRecords(raw).join("\n").trim();
+  } else {
+    value = String(raw || "")
+      .split(/\r?\n/)
+      .filter((line) => {
+        const t = String(line || "").trim();
+        if (!t) return false;
+        if (/^[\t;,]+$/.test(t)) return false;
+        return true;
+      })
+      .join("\n")
+      .trim();
   }
-  return String(raw || "")
-    .split(/\r?\n/)
-    .filter((line) => {
-      const t = String(line || "").trim();
-      if (!t) return false;
-      if (/^[\t;,]+$/.test(t)) return false;
-      return true;
-    })
-    .join("\n")
-    .trim();
+  activeSourceTextCache = { mode, raw, value };
+  return value;
 };
 
 let exportSourceDataMapKey = "";
@@ -2412,7 +2431,8 @@ function scheduleLayoutPreviewRefresh() {
 
 function updateLayoutRowHeadLabel(colLabel, idx, slot) {
   if (!colLabel) return;
-  colLabel.textContent = formatLayoutColumnHead(idx, slot);
+  colLabel.textContent = excelColumnLetter(idx);
+  colLabel.title = formatLayoutColumnHead(idx, slot);
 }
 
 function normalizeHeaderLookupName(v) {
@@ -2525,42 +2545,62 @@ function updateFileSourceStats(rawText, opts = {}) {
 async function persistSourceCache() {
   const cache = globalThis.__goodsAuditCache;
   if (!cache) return;
-  if (sourceState.file.text || sourceState.file.fileName) {
-    let fileExport = null;
-    try {
-      fileExport = serializeSourceExportData(
-        ensureSourceExportDataShape(sourceState.file.sourceExportData) ||
-          sourceState.file.sourceExportData
-      );
-    } catch {
-      fileExport = null;
+  // Пишем в IndexedDB только когда исходник реально поменялся: без этого каждое
+  // изменение любой настройки заново сохраняло многомегабайтный текст.
+  const fileNamesKey = normalizeFileNamesList(sourceState.file.fileNames).join("");
+  const fileDirty =
+    lastPersistedSource.fileText !== sourceState.file.text ||
+    lastPersistedSource.fileName !== String(sourceState.file.fileName || "") ||
+    lastPersistedSource.fileNamesKey !== fileNamesKey;
+  if (fileDirty) {
+    if (sourceState.file.text || sourceState.file.fileName) {
+      let fileExport = null;
+      try {
+        fileExport = serializeSourceExportData(
+          ensureSourceExportDataShape(sourceState.file.sourceExportData) ||
+            sourceState.file.sourceExportData
+        );
+      } catch {
+        fileExport = null;
+      }
+      await cache.saveSourceCache("file", {
+        text: sourceState.file.text,
+        fileName: sourceState.file.fileName,
+        fileNames: normalizeFileNamesList(sourceState.file.fileNames),
+        sourceExportData: fileExport,
+      });
+    } else {
+      await cache.clearSourceCache("file");
     }
-    await cache.saveSourceCache("file", {
-      text: sourceState.file.text,
-      fileName: sourceState.file.fileName,
-      fileNames: normalizeFileNamesList(sourceState.file.fileNames),
-      sourceExportData: fileExport,
-    });
-  } else {
-    await cache.clearSourceCache("file");
+    lastPersistedSource.fileText = sourceState.file.text;
+    lastPersistedSource.fileName = String(sourceState.file.fileName || "");
+    lastPersistedSource.fileNamesKey = fileNamesKey;
   }
-  const text = String(sourceState.textInput || "").trim();
-  if (text) {
-    let textExport = null;
-    try {
-      textExport = serializeSourceExportData(
-        ensureSourceExportDataShape(sourceState.textExportData) || sourceState.textExportData
-      );
-    } catch {
-      textExport = null;
+  const textDirty = lastPersistedSource.textInput !== sourceState.textInput;
+  if (textDirty) {
+    const text = String(sourceState.textInput || "").trim();
+    if (text) {
+      // Разобранные данные пишем только если они собраны именно для этого текста —
+      // устаревший блоб от предыдущей версии текста не сохраняем.
+      let textExport = null;
+      try {
+        const shaped = ensureSourceExportDataShape(sourceState.textExportData);
+        const expectedKey = sourceState.mode === "text" ? getActiveSourceText() : null;
+        if (shaped && expectedKey != null && shaped.sourceTextKey === expectedKey) {
+          textExport = serializeSourceExportData(shaped);
+        }
+      } catch {
+        textExport = null;
+      }
+      await cache.saveSourceCache("text", {
+        text,
+        fileName: "",
+        sourceExportData: textExport,
+      });
+    } else {
+      await cache.clearSourceCache("text");
     }
-    await cache.saveSourceCache("text", {
-      text,
-      fileName: "",
-      sourceExportData: textExport,
-    });
-  } else {
-    await cache.clearSourceCache("text");
+    lastPersistedSource.textInput = sourceState.textInput;
   }
 }
 
@@ -2580,6 +2620,11 @@ async function restoreSourceFromCache() {
         skipExportRebuild: Boolean(sourceState.file.sourceExportData),
       });
       if (!sourceState.file.sourceExportData) rebuildActiveSourceExportData();
+      lastPersistedSource.fileText = sourceState.file.text;
+      lastPersistedSource.fileName = String(sourceState.file.fileName || "");
+      lastPersistedSource.fileNamesKey = normalizeFileNamesList(sourceState.file.fileNames).join(
+        ""
+      );
     }
     const textEntry = await cache.loadSourceCache("text");
     if (textEntry?.text) {
@@ -2590,6 +2635,7 @@ async function restoreSourceFromCache() {
         ensureSourceExportDataShape(deserializeSourceExportData(textEntry.sourceExportData)) ||
         null;
       if (!sourceState.textExportData) rebuildActiveSourceExportData();
+      lastPersistedSource.textInput = sourceState.textInput;
     }
   } catch {
   }
@@ -2621,7 +2667,16 @@ function getJobProgressDone(job) {
 }
 
 function formatStatus(job) {
-  if (!job) return "Нет данных. Загрузите файл и нажмите «Обработать».";
+  if (!job) {
+    return [
+      "Как пользоваться:",
+      "1. Выберите файл Excel или вставьте строки.",
+      "2. Нажмите «Обработать» — откроется окно парсинга.",
+      "3. Когда всё готово, скопируйте результат кнопками ниже.",
+      "",
+      "Пороги цен и колонки таблицы — в настройках (шестерёнка справа сверху).",
+    ].join("\n");
+  }
   const total = getJobProgressTotal(job);
   const ok = job.results?.length ?? job.resultsCount ?? 0;
   const err = job.errors?.length ?? job.errorsCount ?? 0;
@@ -2772,6 +2827,11 @@ function render(jobRaw) {
   $("pause").textContent = paused ? "Продолжить" : "Пауза";
   $("stop").disabled = runControlBusy || !(running || paused);
 
+  $("run").classList.toggle(
+    "is-ready",
+    !job && !running && !paused && Boolean(getActiveSourceText())
+  );
+
   if (!job) {
     previewRequestDateCache = { key: "", value: "" };
     resetJobProgressUi({ show: false });
@@ -2901,7 +2961,9 @@ async function refresh(opts = {}) {
 function refreshRunButtonOnly() {
   const running = lastJobState?.phase === "running";
   const paused = lastJobState?.phase === "paused";
-  $("run").disabled = running || paused || !getActiveSourceText();
+  const hasSource = Boolean(getActiveSourceText());
+  $("run").disabled = running || paused || !hasSource;
+  $("run").classList.toggle("is-ready", !lastJobState && !running && !paused && hasSource);
 }
 
 function showSettingsPanel(open, opts = {}) {
@@ -3102,8 +3164,6 @@ function createLayoutRow(containerId, prefKey, slot, idx) {
     await refresh();
   });
 
-  const head = document.createElement("div");
-  head.className = "layout-row-head";
   const dragHandle = document.createElement("span");
   dragHandle.className = "layout-drag-handle";
   dragHandle.setAttribute("aria-hidden", "true");
@@ -3112,7 +3172,7 @@ function createLayoutRow(containerId, prefKey, slot, idx) {
   colLabel.className = "layout-out-col";
   updateLayoutRowHeadLabel(colLabel, idx, slot);
 
-  const rm = createDeleteButton({ ariaLabel: "Удалить колонку" });
+  const rm = createDeleteButton({ ariaLabel: "Удалить колонку", small: true });
   rm.addEventListener("click", async () => {
     if (outputPrefs[prefKey].length === 0) return;
     const letter = excelColumnLetter(idx);
@@ -3123,7 +3183,6 @@ function createLayoutRow(containerId, prefKey, slot, idx) {
     await savePopupPrefs();
     await refresh();
   });
-  head.append(dragHandle, colLabel, rm);
 
   const select = document.createElement("select");
   select.className = "select-oz layout-mapping-select";
@@ -3170,7 +3229,8 @@ function createLayoutRow(containerId, prefKey, slot, idx) {
   const aliasInput = document.createElement("input");
   aliasInput.type = "text";
   aliasInput.className = "layout-src-alias";
-  aliasInput.placeholder = "заголовок столбца, если надо";
+  aliasInput.placeholder = "заголовок столбца";
+  aliasInput.title = "Название столбца в исходнике (необязательно)";
   aliasInput.value = slot.type === "source" ? slot.label || "" : "";
   aliasInput.style.display = slot.type === "source" ? "" : "none";
   aliasInput.addEventListener("input", () => {
@@ -3185,7 +3245,8 @@ function createLayoutRow(containerId, prefKey, slot, idx) {
     await savePopupPrefs();
   });
 
-  row.append(head, select, aliasInput);
+  row.classList.toggle("has-alias", slot.type === "source");
+  row.append(dragHandle, colLabel, select, aliasInput, rm);
   select.draggable = false;
   aliasInput.draggable = false;
   rm.draggable = false;
@@ -3377,6 +3438,214 @@ async function importTableColumnsFromFile(file) {
   showAppToast("Колонки таблицы импортированы.", 2800);
 }
 
+const SETTINGS_PRESETS_KEY = "goodsAuditSettingsPresetsV1";
+const SETTINGS_PRESETS_MAX = 20;
+const PRESET_NAME_MAX_LEN = 40;
+
+function normalizePresetName(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, PRESET_NAME_MAX_LEN);
+}
+
+function normalizeSettingsPreset(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const name = normalizePresetName(raw.name);
+  if (!name) return null;
+  const id =
+    typeof raw.id === "string" && raw.id
+      ? raw.id
+      : typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `p${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const data = raw.data && typeof raw.data === "object" ? raw.data : {};
+  return {
+    id,
+    name,
+    createdAt: Number(raw.createdAt) || Date.now(),
+    updatedAt: Number(raw.updatedAt) || Date.now(),
+    data,
+  };
+}
+
+async function loadSettingsPresets() {
+  try {
+    const { [SETTINGS_PRESETS_KEY]: arr } = await chrome.storage.local.get(SETTINGS_PRESETS_KEY);
+    settingsPresets = (Array.isArray(arr) ? arr : [])
+      .map((x) => normalizeSettingsPreset(x))
+      .filter(Boolean);
+  } catch {
+    settingsPresets = [];
+  }
+  return settingsPresets;
+}
+
+async function saveSettingsPresets() {
+  await chrome.storage.local.set({ [SETTINGS_PRESETS_KEY]: settingsPresets });
+}
+
+function buildPresetDataFromCurrent() {
+  return {
+    priceThreshold: getPriceThreshold(),
+    minPriceThreshold: getMinPriceThreshold(),
+    vulnerableMinPriceThreshold: getVulnerableMinPriceThreshold(),
+    layoutGe: cloneLayoutForPrefs(outputPrefs.layoutGe),
+    layoutLt: cloneLayoutForPrefs(outputPrefs.layoutLt),
+    opsWarehouses: getOpsWarehousesList(),
+    excludeMemoryIds: outputPrefs.excludeMemoryIds === true,
+    aggressiveMode: outputPrefs.aggressiveMode === true,
+    hyperlinksEnabled: areHyperlinksEnabled(),
+    hyperlinkServiceArticleId: normalizeHyperlinkService(outputPrefs.hyperlinkServiceArticleId),
+    hyperlinkServiceShipment: normalizeHyperlinkService(outputPrefs.hyperlinkServiceShipment),
+  };
+}
+
+function getSelectedPreset() {
+  if (!selectedPresetId) return null;
+  return settingsPresets.find((p) => p.id === selectedPresetId) || null;
+}
+
+function renderPresetSelect() {
+  const select = $("presetSelect");
+  if (!select) return;
+  select.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = settingsPresets.length
+    ? "— выберите пресет —"
+    : "Пресетов пока нет";
+  select.append(placeholder);
+  for (const preset of settingsPresets) {
+    const opt = document.createElement("option");
+    opt.value = preset.id;
+    opt.textContent = preset.name;
+    select.append(opt);
+  }
+  if (selectedPresetId && settingsPresets.some((p) => p.id === selectedPresetId)) {
+    select.value = selectedPresetId;
+  } else {
+    selectedPresetId = "";
+    select.value = "";
+  }
+  const hasSelection = Boolean(getSelectedPreset());
+  if ($("btnApplyPreset")) $("btnApplyPreset").disabled = !hasSelection;
+  if ($("btnUpdatePreset")) $("btnUpdatePreset").disabled = !hasSelection;
+  if ($("btnDeletePreset")) $("btnDeletePreset").disabled = !hasSelection;
+  select.disabled = settingsPresets.length === 0;
+}
+
+async function applySettingsPreset(preset) {
+  const d = preset?.data && typeof preset.data === "object" ? preset.data : {};
+  const parsedUpper = Number(d.priceThreshold);
+  outputPrefs.priceThreshold =
+    Number.isFinite(parsedUpper) && parsedUpper >= 0 ? parsedUpper : DEFAULT_PRICE_THRESHOLD;
+  outputPrefs.minPriceThreshold = Math.max(0, Number(d.minPriceThreshold) || 0);
+  outputPrefs.vulnerableMinPriceThreshold = Math.max(
+    0,
+    Number(d.vulnerableMinPriceThreshold) || 0
+  );
+  outputPrefs.layoutGe = clampSlotsLength(
+    migrateLayoutToSlots(d.layoutGe, DEFAULT_LAYOUT_GE),
+    DEFAULT_LAYOUT_GE
+  );
+  outputPrefs.layoutLt = clampSlotsLength(
+    migrateLayoutToSlots(d.layoutLt, DEFAULT_LAYOUT_LT),
+    DEFAULT_LAYOUT_LT
+  );
+  outputPrefs.opsWarehouses = Array.isArray(d.opsWarehouses)
+    ? d.opsWarehouses.map((x) => String(x ?? ""))
+    : [];
+  if (!outputPrefs.opsWarehouses.length) outputPrefs.opsWarehouses = [""];
+  outputPrefs.excludeMemoryIds = d.excludeMemoryIds === true;
+  outputPrefs.hyperlinksEnabled = d.hyperlinksEnabled !== false;
+  outputPrefs.hyperlinkServiceArticleId = normalizeHyperlinkService(d.hyperlinkServiceArticleId);
+  outputPrefs.hyperlinkServiceShipment = normalizeHyperlinkService(d.hyperlinkServiceShipment);
+  const nextAggressive = d.aggressiveMode === true;
+  const aggressiveChanged = outputPrefs.aggressiveMode !== nextAggressive;
+  outputPrefs.aggressiveMode = nextAggressive;
+  rowBandCache = { key: "", ge: [], lt: [], below: [], vulnerable: [], all: [] };
+  applyOutputPrefsToUi({ rebuildLayout: true, rebuildLists: true });
+  refreshCopyButtonsText();
+  if (aggressiveChanged) {
+    try {
+      await chrome.runtime.sendMessage({
+        type: "UPDATE_AGGRESSIVE_MODE",
+        sourceMode: getActiveModeKey(),
+        aggressiveMode: nextAggressive,
+      });
+    } catch {
+    }
+  }
+  await savePopupPrefs();
+  await refresh();
+}
+
+async function onSavePresetClick() {
+  if (settingsPresets.length >= SETTINGS_PRESETS_MAX) {
+    showAppToast(`Достигнут лимит пресетов (${SETTINGS_PRESETS_MAX}). Удалите ненужный.`, 4200);
+    return;
+  }
+  const name = await askAppInput({
+    title: "Новый пресет",
+    message: "Название пресета — например: «Основной склад» или «Инвентаризация».",
+    placeholder: "Название пресета",
+    okText: "Сохранить",
+    cancelText: "Отмена",
+  });
+  if (name == null) return;
+  const cleanName = normalizePresetName(name);
+  if (!cleanName) {
+    showAppToast("Название пресета не может быть пустым.", 3200);
+    return;
+  }
+  const now = Date.now();
+  const preset = normalizeSettingsPreset({
+    name: cleanName,
+    createdAt: now,
+    updatedAt: now,
+    data: buildPresetDataFromCurrent(),
+  });
+  if (!preset) return;
+  settingsPresets.push(preset);
+  selectedPresetId = preset.id;
+  renderPresetSelect();
+  await saveSettingsPresets();
+  await savePopupPrefs();
+  showAppToast(`Пресет «${preset.name}» сохранён.`, 2800);
+}
+
+async function onUpdatePresetClick() {
+  const preset = getSelectedPreset();
+  if (!preset) return;
+  const ok = await askAppConfirm(
+    `Перезаписать пресет «${preset.name}» текущими настройками?`,
+    "Обновление пресета"
+  );
+  if (!ok) return;
+  preset.data = buildPresetDataFromCurrent();
+  preset.updatedAt = Date.now();
+  await saveSettingsPresets();
+  showAppToast(`Пресет «${preset.name}» обновлён.`, 2800);
+}
+
+async function onDeletePresetClick() {
+  const preset = getSelectedPreset();
+  if (!preset) return;
+  const ok = await askAppConfirm(`Удалить пресет «${preset.name}»?`, "Удаление пресета");
+  if (!ok) return;
+  settingsPresets = settingsPresets.filter((p) => p.id !== preset.id);
+  selectedPresetId = "";
+  renderPresetSelect();
+  await saveSettingsPresets();
+  await savePopupPrefs();
+  showAppToast("Пресет удалён.", 2400);
+}
+
+async function onApplyPresetClick() {
+  const preset = getSelectedPreset();
+  if (!preset) return;
+  await applySettingsPreset(preset);
+  showAppToast(`Пресет «${preset.name}» применён.`, 2800);
+}
+
 function cloneLayoutDeletionHistoryForPrefs(arr) {
   if (!Array.isArray(arr)) return [];
   try {
@@ -3423,9 +3692,7 @@ function collectPopupPrefs() {
     settingsOpen: Boolean($("panelSettings") && !$("panelSettings").hidden),
     settingsActiveTab: getSettingsActiveTab(),
     prefsLayoutSchemaVersion: LAYOUT_PREFS_SCHEMA_VERSION,
-    threads: $("threads")?.value ?? "5",
-    delayMs: $("delayMs")?.value ?? "750",
-    settleMs: $("settleMs")?.value ?? "750",
+    selectedPresetId: String(selectedPresetId || ""),
     priceThreshold: $("priceThreshold")?.value ?? String(DEFAULT_PRICE_THRESHOLD),
     minPriceThreshold: $("minPriceThreshold")?.value ?? String(DEFAULT_MIN_PRICE_THRESHOLD),
     vulnerableMinPriceThreshold:
@@ -3465,9 +3732,7 @@ async function savePopupPrefs() {
 async function restorePopupPrefs() {
   const { [POPUP_PREFS_KEY]: prefs } = await chrome.storage.local.get(POPUP_PREFS_KEY);
   const raw = prefs || {};
-  if (raw.threads != null) $("threads").value = String(raw.threads);
-  if (raw.delayMs != null) $("delayMs").value = String(raw.delayMs);
-  if (raw.settleMs != null) $("settleMs").value = String(raw.settleMs);
+  selectedPresetId = typeof raw.selectedPresetId === "string" ? raw.selectedPresetId : "";
   const restoredPriceThreshold = Number(raw.priceThreshold);
   outputPrefs.priceThreshold =
     Number.isFinite(restoredPriceThreshold) && restoredPriceThreshold >= 0
@@ -4429,9 +4694,6 @@ $("run").addEventListener("click", async () => {
       sourceMode: getActiveModeKey(),
       sourceName: getActiveSourceName(),
       sourceVisibleCount: getActiveSourceVisibleCount(),
-      delayMs: Math.max(0, Number($("delayMs").value) || 0),
-      settleMs: Math.max(0, Number($("settleMs").value) || 0),
-      threads: Math.max(1, Math.min(12, Math.floor(Number($("threads").value) || 1))),
       opsWarehouses: getOpsWarehousesList(),
       aggressiveMode: outputPrefs.aggressiveMode === true,
     });
@@ -4665,9 +4927,6 @@ $("clearMem").addEventListener("click", async () => {
   showAppToast("Память ID сброшена.", 3200);
 });
 
-$("threads").addEventListener("input", () => schedulePopupPrefsSave(120));
-$("delayMs").addEventListener("input", () => schedulePopupPrefsSave(120));
-$("settleMs").addEventListener("input", () => schedulePopupPrefsSave(120));
 $("priceThreshold").addEventListener("input", () => {
   outputPrefs.priceThreshold = Math.max(0, Number($("priceThreshold").value) || 0);
   refreshCopyButtonsText();
@@ -4786,8 +5045,13 @@ function resetExtensionStateToFactory() {
   void chrome.storage.local.remove([JOB_UNDO_KEY_FILE, JOB_UNDO_KEY_TEXT]);
   exportSourceDataMapKey = "";
   exportSourceDataMap = null;
+  activeSourceTextCache = { mode: "", raw: null, value: "" };
+  lastPersistedSource = { fileText: null, fileName: null, fileNamesKey: null, textInput: null };
   vulnerabilityKeywordMatcherCacheKey = "";
   vulnerabilityKeywordMatcherEntries = [];
+  settingsPresets = [];
+  selectedPresetId = "";
+  renderPresetSelect();
   closeSecretKeywordsModal();
   setUndoEnabled("undoClearSource", false);
   setUndoEnabled("undoClearJob", false);
@@ -4809,9 +5073,6 @@ async function clearAllExtensionCache() {
   await chrome.storage.local.clear();
   if (globalThis.__goodsAuditCache) await globalThis.__goodsAuditCache.clearAllSourceCache();
   resetExtensionStateToFactory();
-  $("threads").value = "5";
-  $("delayMs").value = "750";
-  $("settleMs").value = "750";
   $("sourceFile").value = "";
   $("sourceText").value = "";
   applyPopupSize(POPUP_SIZE_DEFAULT.w, POPUP_SIZE_DEFAULT.h);
@@ -4900,6 +5161,17 @@ $("secretKeywordsSearch")?.addEventListener("input", () => {
   secretKeywordsSearchQuery = String($("secretKeywordsSearch")?.value || "");
   renderVulnerabilityKeywordsList("secretKeywordsList");
 });
+
+$("presetSelect")?.addEventListener("change", () => {
+  selectedPresetId = String($("presetSelect")?.value || "");
+  renderPresetSelect();
+  schedulePopupPrefsSave(150);
+});
+
+$("btnApplyPreset")?.addEventListener("click", () => void onApplyPresetClick());
+$("btnSavePreset")?.addEventListener("click", () => void onSavePresetClick());
+$("btnUpdatePreset")?.addEventListener("click", () => void onUpdatePresetClick());
+$("btnDeletePreset")?.addEventListener("click", () => void onDeletePresetClick());
 
 $("btnExportTableColumns")?.addEventListener("click", () => {
   exportTableColumnsToFile();
@@ -5069,7 +5341,9 @@ $("sourceText").addEventListener("input", () => {
   sourceState.textInput = $("sourceText").value || "";
   setSourceMeta();
   refreshRunButtonOnly();
-  rebuildActiveSourceExportData();
+  // Полный разбор текста не делаем на каждый ввод: getActiveSourceExportData()
+  // пересоберёт данные лениво, когда они реально понадобятся.
+  invalidateExportSourceDataCache();
   scheduleLayoutPreviewRefresh();
   clearTimeout(textInputSaveTimer);
   textInputSaveTimer = setTimeout(() => void savePopupPrefs(), 280);
@@ -5080,7 +5354,7 @@ $("sourceText").addEventListener("paste", () => {
     sourceState.textInput = $("sourceText").value || "";
     setSourceMeta();
     refreshRunButtonOnly();
-    rebuildActiveSourceExportData();
+    invalidateExportSourceDataCache();
     scheduleLayoutPreviewRefresh();
     void savePopupPrefs();
   }, 0);
@@ -5136,6 +5410,8 @@ window.addEventListener("pagehide", () => {
     initPopupResize();
     initSourceFileDrop();
     const hadPrefs = await restorePopupPrefs();
+    await loadSettingsPresets();
+    renderPresetSelect();
     await restoreSourceFromCache();
     if (!hadPrefs) {
       applyPopupSize(POPUP_SIZE_DEFAULT.w, POPUP_SIZE_DEFAULT.h);
@@ -5149,8 +5425,8 @@ window.addEventListener("pagehide", () => {
     await refresh();
     startJobPollIfNeeded(lastJobState);
   } finally {
-    
-    const splashHoldMs = 1000 + Math.floor(Math.random() * 1501);
+    // Короткая пауза, чтобы сплэш не мигал; долгие искусственные задержки убраны.
+    const splashHoldMs = 320;
     await new Promise((r) => setTimeout(r, splashHoldMs));
     const splash = document.getElementById("bootSplash");
     

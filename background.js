@@ -52,6 +52,100 @@ const runStates = {
   },
 };
 
+// --- Авто-скорость -----------------------------------------------------------
+// Потоки подбираются под железо (ядра/память), а паузы и время ожидания
+// страницы адаптируются на лету по фактическому поведению сайта: успехи
+// ускоряют обработку, медленные страницы и ошибки — притормаживают (AIMD).
+const SPEED_MIN_SETTLE_MS = 150;
+const SPEED_MAX_SETTLE_MS = 4500;
+const SPEED_START_SETTLE_MS = 450;
+const SPEED_MIN_DELAY_MS = 0;
+const SPEED_MAX_DELAY_MS = 2200;
+const SPEED_START_DELAY_MS = 150;
+const SPEED_MAX_THREADS = 8;
+
+function computeAutoThreads(itemCount) {
+  const cores = Math.max(2, Math.floor(Number(navigator.hardwareConcurrency) || 4));
+  const memGb = Number(navigator.deviceMemory) || 4;
+  let threads = Math.round(cores * 0.75);
+  if (memGb <= 2) threads = Math.min(threads, 2);
+  else if (memGb <= 4) threads = Math.min(threads, 4);
+  else if (memGb <= 8) threads = Math.min(threads, 6);
+  else threads = Math.min(threads, SPEED_MAX_THREADS);
+  threads = Math.max(2, Math.min(SPEED_MAX_THREADS, threads));
+  const count = Math.floor(Number(itemCount) || 0);
+  if (count > 0) threads = Math.min(threads, count);
+  return Math.max(1, threads);
+}
+
+function createSpeedController(maxThreads) {
+  const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const st = {
+    maxThreads: Math.max(1, Math.floor(Number(maxThreads) || 1)),
+    threadLimit: Math.max(1, Math.floor(Number(maxThreads) || 1)),
+    settleMs: SPEED_START_SETTLE_MS,
+    delayMs: SPEED_START_DELAY_MS,
+    okStreak: 0,
+    slowStreak: 0,
+    failStreak: 0,
+    emaItemMs: 0,
+    itemsDone: 0,
+  };
+  return {
+    getSettleMs: () => Math.round(st.settleMs),
+    getDelayMs: () => Math.round(st.delayMs),
+    getThreadLimit: () => st.threadLimit,
+    reportItem({ ok, slow = false, hardFail = false, durationMs = 0 }) {
+      st.itemsDone += 1;
+      const dur = Number(durationMs) || 0;
+      if (dur > 0) {
+        st.emaItemMs = st.emaItemMs > 0 ? st.emaItemMs * 0.8 + dur * 0.2 : dur;
+      }
+      if (ok && !slow) {
+        st.okStreak += 1;
+        st.slowStreak = 0;
+        st.failStreak = 0;
+        st.settleMs = clampNum(st.settleMs * 0.93 - 8, SPEED_MIN_SETTLE_MS, SPEED_MAX_SETTLE_MS);
+        st.delayMs = clampNum(st.delayMs - 35, SPEED_MIN_DELAY_MS, SPEED_MAX_DELAY_MS);
+        if (st.okStreak >= 10 && st.threadLimit < st.maxThreads) {
+          st.threadLimit += 1;
+          st.okStreak = 0;
+        }
+      } else if (ok && slow) {
+        st.okStreak = 0;
+        st.failStreak = 0;
+        st.slowStreak += 1;
+        st.settleMs = clampNum(st.settleMs * 1.2 + 120, SPEED_MIN_SETTLE_MS, SPEED_MAX_SETTLE_MS);
+        st.delayMs = clampNum(st.delayMs + 60, SPEED_MIN_DELAY_MS, SPEED_MAX_DELAY_MS);
+        if (st.slowStreak >= 6 && st.threadLimit > 2) {
+          st.threadLimit -= 1;
+          st.slowStreak = 0;
+        }
+      } else {
+        st.okStreak = 0;
+        st.slowStreak = 0;
+        st.failStreak += 1;
+        st.settleMs = clampNum(st.settleMs * 1.45 + 200, SPEED_MIN_SETTLE_MS, SPEED_MAX_SETTLE_MS);
+        st.delayMs = clampNum(st.delayMs + 150, SPEED_MIN_DELAY_MS, SPEED_MAX_DELAY_MS);
+        if ((hardFail || st.failStreak >= 2) && st.threadLimit > 1) {
+          st.threadLimit -= 1;
+          st.failStreak = 0;
+        }
+      }
+    },
+    snapshot() {
+      return {
+        auto: true,
+        threads: st.threadLimit,
+        maxThreads: st.maxThreads,
+        settleMs: Math.round(st.settleMs),
+        delayMs: Math.round(st.delayMs),
+        avgItemMs: Math.round(st.emaItemMs),
+      };
+    },
+  };
+}
+
 function normalizeSourceMode(mode) {
   return mode === "text" ? "text" : "file";
 }
@@ -530,10 +624,13 @@ async function scrapeArticleOnTab(
   opsWarehouses,
   fallbackShipment = "",
   isAbortRequested = () => false,
-  isPauseRequested = () => false
+  isPauseRequested = () => false,
+  perf = null
 ) {
   const url = `${BASE}${encodeURIComponent(articleId)}`;
   const opsArg = Array.isArray(opsWarehouses) ? opsWarehouses : [];
+  const resolveSettleMs = () =>
+    Math.max(0, Number(typeof settleMs === "function" ? settleMs() : settleMs) || 0);
 
   async function waitIfPaused() {
     while (isPauseRequested() && !isAbortRequested()) {
@@ -604,8 +701,9 @@ async function scrapeArticleOnTab(
       if (isAbortRequested()) {
         throw new Error("Остановлено");
       }
+      if (perf) perf.attempts = Math.max(Number(perf.attempts) || 0, attempt + 1);
       if (attempt > 0) {
-        await sleep(550);
+        await sleep(Math.min(900, 350 + Math.round(resolveSettleMs() * 0.35)));
       }
       const results = await execScriptFunc(
         tabId,
@@ -693,9 +791,18 @@ async function scrapeArticleOnTab(
     }
 
     await waitIfPaused();
-    await sleep(Math.max(0, Number(settleMs) || 0) + cycle * 100);
+    await sleep(resolveSettleMs() + cycle * 100);
     await waitIfPaused();
-    await waitForDataMarkers(tabId, MARKER_WAIT_MS, isAbortRequested, isPauseRequested);
+    const markersFound = await waitForDataMarkers(
+      tabId,
+      MARKER_WAIT_MS,
+      isAbortRequested,
+      isPauseRequested
+    );
+    if (perf) {
+      perf.cycles = cycle + 1;
+      perf.markersFound = (perf.markersFound !== false) && markersFound;
+    }
     await waitIfPaused();
     await execScriptFiles(tabId, ["page-scrape.js"]);
     raw = await readSnapshotAfterInject();
@@ -1138,9 +1245,6 @@ async function tryResumePausedJob(mode = "file") {
       await runJobFromState({
         sourceMode: key,
         sourceName: job.sourceName || "",
-        delayMs: job.delayMs,
-        settleMs: job.settleMs,
-        threadCount: job.threads,
         aggressiveMode: job.aggressiveMode === true,
         opsWarehouses,
         toFetch: remaining,
@@ -1677,13 +1781,10 @@ async function runJobFromState(startPayload) {
   const {
     sourceMode,
     sourceName,
-    delayMs,
-    settleMs,
     aggressiveMode,
     toFetch,
     skippedMem,
     skippedDupSource,
-    threadCount,
     inputStats,
     opsWarehouses,
     skippedOpsWarehouse,
@@ -1700,11 +1801,9 @@ async function runJobFromState(startPayload) {
   touchWorkerHeartbeat(mode);
   await ensureKeepAliveAlarm();
 
-  const requestedThreads = Math.max(1, Math.min(12, Math.floor(Number(threadCount) || 1)));
-  const threads = Math.max(1, Math.min(requestedThreads, Math.max(1, toFetch.length)));
+  const threads = computeAutoThreads(toFetch.length);
+  const speedCtl = createSpeedController(threads);
   const runConfig = {
-    delayMs: Math.max(0, Number(delayMs) || 0),
-    settleMs: Math.max(0, Number(settleMs) || 0),
     aggressiveMode: aggressiveMode === true,
   };
   state.activeRunConfig = runConfig;
@@ -1727,8 +1826,8 @@ async function runJobFromState(startPayload) {
     abortRequested: false,
     sourceMode: sourceMode === "text" ? "text" : "file",
     sourceName,
-    delayMs,
-    settleMs,
+    autoSpeed: true,
+    speed: speedCtl.snapshot(),
     aggressiveMode: runConfig.aggressiveMode,
     threads,
     
@@ -1825,6 +1924,12 @@ async function runJobFromState(startPayload) {
           }
           await persistJob(job, mode, { force: true });
         }
+        // Авто-скорость: контроллер может временно «парковать» лишние потоки.
+        if (workerIndex >= speedCtl.getThreadLimit()) {
+          if (nextAssign >= toFetch.length) break;
+          await sleep(450);
+          continue;
+        }
         const item = takeNext();
         if (!item) break;
 
@@ -1849,8 +1954,10 @@ async function runJobFromState(startPayload) {
         job.currentArticleId = item.articleId;
         await persistJob(job, mode);
 
+        const itemStartedAt = Date.now();
+        const perf = { attempts: 0, markersFound: true, cycles: 1 };
         try {
-          
+
           const opsForItem = Array.isArray(job.opsWarehouses)
             ? job.opsWarehouses
             : opsListForJob;
@@ -1858,15 +1965,21 @@ async function runJobFromState(startPayload) {
             scrapeArticleOnTab(
               workerTabId,
               item.articleId,
-              runConfig.settleMs,
+              () => speedCtl.getSettleMs(),
               opsForItem,
               item.shipmentSource || "",
               () => state.abortRequested,
-              () => state.pauseRequested
+              () => state.pauseRequested,
+              perf
             ),
             ITEM_HARD_TIMEOUT_MS,
             `Таймаут обработки в потоке (${Math.round(ITEM_HARD_TIMEOUT_MS / 1000)}с)`
           );
+          speedCtl.reportItem({
+            ok: true,
+            slow: perf.attempts >= 3 || perf.markersFound === false || perf.cycles > 1,
+            durationMs: Date.now() - itemStartedAt,
+          });
           const opsList = Array.isArray(opsForItem)
             ? opsForItem.map((x) => String(x || "").trim()).filter(Boolean)
             : [];
@@ -1926,6 +2039,11 @@ async function runJobFromState(startPayload) {
               workerTabId = await respawnWorkerTab(workerTabId);
             } catch {}
           }
+          speedCtl.reportItem({
+            ok: false,
+            hardFail: msg.includes("Таймаут"),
+            durationMs: Date.now() - itemStartedAt,
+          });
           job.errors.push({
             articleId: item.articleId,
             message: msg,
@@ -1934,15 +2052,17 @@ async function runJobFromState(startPayload) {
           });
         }
 
+        job.speed = speedCtl.snapshot();
         job.currentIndex =
           job.results.length + job.errors.length + (job.skippedOpsWarehouse?.length || 0);
         await persistJob(job, mode);
 
-        if (runConfig.delayMs > 0) {
+        const postDelayMs = speedCtl.getDelayMs();
+        if (postDelayMs > 0) {
           while (state.pauseRequested && !state.abortRequested) {
             await sleep(250);
           }
-          await sleep(runConfig.delayMs);
+          await sleep(postDelayMs);
         }
       }
     }
@@ -2319,9 +2439,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
     const sourceName = String(msg.sourceName || "").trim();
-    const delayMs = Math.max(0, Number(msg.delayMs) || 0);
-    const settleMs = Math.max(0, Number(msg.settleMs) || 750);
-    const threadCount = Math.max(1, Math.min(12, Math.floor(Number(msg.threads) || 5)));
     const aggressiveMode =
       typeof msg.aggressiveMode === "boolean"
         ? msg.aggressiveMode
@@ -2392,10 +2509,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await runJobFromState({
         sourceMode,
         sourceName,
-        delayMs,
-        settleMs,
         aggressiveMode,
-        threadCount,
         opsWarehouses,
         toFetch,
         skippedMem,
@@ -2411,10 +2525,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         phase: "done",
         sourceMode,
         sourceName,
-        delayMs,
-        settleMs,
+        autoSpeed: true,
         aggressiveMode,
-        threads: Math.max(1, Math.min(12, Math.floor(Number(msg.threads) || 5))),
+        threads: 0,
         toFetch: [],
         skippedMem: [],
         skippedDupSource: [],

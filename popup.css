@@ -26,7 +26,7 @@ html {
   width: var(--popup-w);
   height: var(--popup-h);
   min-width: 360px;
-  min-height: 400px;
+  min-height: 380px;
   max-width: 800px;
   max-height: 600px;
   overflow: hidden;
@@ -418,6 +418,18 @@ body.ui-gradient .topbar {
 
 .layout-tab-toolbar {
   margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.layout-io-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .layout-deleted-wrap {
@@ -554,6 +566,113 @@ body.ui-gradient .topbar {
   margin: 0 0 4px;
 }
 
+.settings-heading-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-autosave-note {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--oz-muted);
+  white-space: nowrap;
+}
+
+/* --- Пресеты настроек --- */
+.preset-bar {
+  margin: 10px 0 2px;
+  padding: 10px;
+  border: 1px solid var(--oz-line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f7faff 0%, #ffffff 70%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preset-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preset-bar-title {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--oz-ink);
+}
+
+.preset-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preset-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.preset-select:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.preset-bar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.preset-bar-actions .btn:first-child {
+  margin-right: auto;
+}
+
+.preset-delete:hover:not(:disabled) {
+  color: var(--oz-danger);
+  background: var(--oz-danger-soft);
+}
+
+/* --- Секции настроек --- */
+.settings-group {
+  margin: 0 0 6px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--oz-line);
+}
+
+.settings-group:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.settings-group-title {
+  margin: 4px 0 10px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--oz-muted);
+}
+
+.settings-group--danger .settings-group-title {
+  color: var(--oz-danger);
+}
+
+.settings-group-hint {
+  margin: -4px 0 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--oz-muted);
+}
+
+.settings-group .field:last-child {
+  margin-bottom: 0;
+}
+
+
 .layout-config {
   margin-top: 14px;
   display: grid;
@@ -578,20 +697,25 @@ body.ui-gradient .topbar {
 .layout-constructor {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .layout-constructor-row {
   border: 1px solid var(--oz-line);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 5px 8px;
   background: #fff;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 14px 30px minmax(0, 1fr) 28px;
+  align-items: center;
   gap: 6px;
   cursor: grab;
   transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
   overflow: visible;
+}
+
+.layout-constructor-row.has-alias {
+  grid-template-columns: 14px 30px minmax(0, 1.15fr) minmax(0, 0.85fr) 28px;
 }
 
 .layout-constructor-row.is-dragging {
@@ -604,17 +728,9 @@ body.ui-gradient .topbar {
   box-shadow: 0 0 0 2px rgba(0, 91, 255, 0.15);
 }
 
-.layout-row-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  overflow: visible;
-}
-
 .layout-drag-handle {
   flex-shrink: 0;
-  width: 18px;
+  width: 14px;
   text-align: center;
   font-size: 12px;
   line-height: 1;
@@ -625,16 +741,28 @@ body.ui-gradient .topbar {
 }
 
 .layout-out-col {
-  flex: 1;
-  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--oz-blue-soft);
   font-size: 11px;
   font-weight: 800;
-  color: var(--oz-muted);
+  color: var(--oz-blue-hover);
+}
+
+.layout-mapping-select {
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 
 .layout-src-alias {
   width: 100%;
-  padding: 6px 10px;
+  min-width: 0;
+  padding: 6px 8px;
   border: 1px solid var(--oz-line);
   border-radius: 8px;
   font: 600 12px var(--font);
@@ -1021,8 +1149,18 @@ body.ui-gradient .topbar {
 
 .ops-list-row .deleteButton,
 .secret-keywords-row .deleteButton,
-.layout-row-head .deleteButton {
+.layout-constructor-row .deleteButton {
   flex-shrink: 0;
+}
+
+.deleteButton--sm {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+
+.deleteButton--sm svg.bin {
+  width: 54%;
 }
 
 .file-source {
@@ -1355,6 +1493,27 @@ textarea:focus {
   min-width: 0;
 }
 
+/* Мягкая пульсация «Обработать», когда исходник загружен и можно запускать. */
+@keyframes runReadyPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 91, 255, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(0, 91, 255, 0);
+  }
+}
+
+.btn-run.is-ready:not(:disabled) {
+  animation: runReadyPulse 2.2s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-run.is-ready:not(:disabled) {
+    animation: none;
+  }
+}
+
 .btn-pause {
   flex: 0 0 30%;
   min-width: 0;
@@ -1682,6 +1841,12 @@ textarea:focus {
   box-shadow: 0 0 0 3px var(--oz-blue-soft);
 }
 
+/* Обычные текстовые модалки (имя пресета, пароль и т.п.) — без капча-стиля. */
+.captcha-modal-input--text {
+  text-transform: none;
+  font: 600 13px var(--font);
+}
+
 .captcha-modal-actions {
   margin-top: 0;
   margin-bottom: 0;
@@ -1833,14 +1998,6 @@ body.ui-gradient .app-toast {
   outline-offset: 2px;
 }
 
-.settings-layout-io {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  margin-top: 10px;
-}
-
 .btn-with-icon {
   display: inline-flex;
   align-items: center;
@@ -1855,9 +2012,7 @@ body.ui-gradient .app-toast {
 }
 
 .settings-cache-actions {
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--oz-line);
+  margin: 0;
 }
 
 .secret-modal-overlay {
