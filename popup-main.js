@@ -2666,17 +2666,6 @@ function getJobProgressDone(job) {
   return ok + err + skippedOps;
 }
 
-function formatSpeedInfoLine(job) {
-  const sp = job?.speed;
-  if (!sp || sp.auto !== true) return "";
-  const threads = Number(sp.threads) || 0;
-  const maxThreads = Number(sp.maxThreads) || 0;
-  if (threads <= 0) return "";
-  const threadsPart = maxThreads > threads ? `${threads} из ${maxThreads}` : `${threads}`;
-  const delay = Math.max(0, Number(sp.delayMs) || 0);
-  return `Авто-скорость: потоки ${threadsPart}, пауза ~${delay} мс`;
-}
-
 function formatStatus(job) {
   if (!job) {
     return [
@@ -2685,7 +2674,7 @@ function formatStatus(job) {
       "2. Нажмите «Обработать» — откроется окно парсинга.",
       "3. Когда всё готово, скопируйте результат кнопками ниже.",
       "",
-      "Скорость подбирается автоматически. Пороги и колонки — в настройках (шестерёнка справа сверху).",
+      "Пороги цен и колонки таблицы — в настройках (шестерёнка справа сверху).",
     ].join("\n");
   }
   const total = getJobProgressTotal(job);
@@ -2700,8 +2689,6 @@ function formatStatus(job) {
   const lines = [];
   if (job.phase === "running") {
     lines.push(`Идёт обработка… ${ok}+${err} / ${total}`);
-    const speedLine = formatSpeedInfoLine(job);
-    if (speedLine) lines.push(`\n${speedLine}`);
   } else if (job.phase === "paused") {
     lines.push(`Пауза. Успешно: ${ok}, ошибок: ${err}.`);
     if (job.stopReason) lines.push(`\n${String(job.stopReason)}`);
