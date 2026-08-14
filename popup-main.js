@@ -442,6 +442,7 @@ let outputPrefs = {
   layoutGe: DEFAULT_LAYOUT_GE.map((fieldId) => ({ type: "field", fieldId })),
   layoutLt: DEFAULT_LAYOUT_LT.map((fieldId) => ({ type: "field", fieldId })),
   opsWarehouses: [],
+  threadsChoice: "auto",
   uiGradient: true,
   aggressiveMode: false,
   excludeMemoryIds: false,
@@ -1595,6 +1596,26 @@ function getVulnerableMinPriceThreshold() {
 
 function getEffectiveUpperThreshold() {
   return Math.max(getPriceThreshold(), getMinPriceThreshold());
+}
+
+function normalizeThreadsChoice(value) {
+  const raw = String(value ?? "auto").trim().toLowerCase();
+  if (raw === "auto" || raw === "" || raw === "0") return "auto";
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n < 1) return "auto";
+  return String(Math.min(12, n));
+}
+
+function getManualThreadsCount() {
+  const choice = normalizeThreadsChoice(outputPrefs.threadsChoice);
+  return choice === "auto" ? 0 : Number(choice);
+}
+
+function applyThreadsChoiceToDom() {
+  const select = $("threadsChoice");
+  if (!select) return;
+  const choice = normalizeThreadsChoice(outputPrefs.threadsChoice);
+  if (select.value !== choice) select.value = choice;
 }
 
 function getOpsWarehousesList(opts = {}) {
@@ -3340,6 +3361,7 @@ function applyOutputPrefsToUi(opts = {}) {
   if ($("vulnerableMinPriceThreshold")) {
     $("vulnerableMinPriceThreshold").value = String(getVulnerableMinPriceThreshold());
   }
+  applyThreadsChoiceToDom();
   applyUiGradientToDom();
   applyAggressiveModeToDom();
   applyExcludeMemoryIdsToDom();
@@ -3490,6 +3512,7 @@ function buildPresetDataFromCurrent() {
     layoutGe: cloneLayoutForPrefs(outputPrefs.layoutGe),
     layoutLt: cloneLayoutForPrefs(outputPrefs.layoutLt),
     opsWarehouses: getOpsWarehousesList(),
+    threadsChoice: normalizeThreadsChoice(outputPrefs.threadsChoice),
     excludeMemoryIds: outputPrefs.excludeMemoryIds === true,
     aggressiveMode: outputPrefs.aggressiveMode === true,
     hyperlinksEnabled: areHyperlinksEnabled(),
@@ -3554,6 +3577,7 @@ async function applySettingsPreset(preset) {
     ? d.opsWarehouses.map((x) => String(x ?? ""))
     : [];
   if (!outputPrefs.opsWarehouses.length) outputPrefs.opsWarehouses = [""];
+  outputPrefs.threadsChoice = normalizeThreadsChoice(d.threadsChoice);
   outputPrefs.excludeMemoryIds = d.excludeMemoryIds === true;
   outputPrefs.hyperlinksEnabled = d.hyperlinksEnabled !== false;
   outputPrefs.hyperlinkServiceArticleId = normalizeHyperlinkService(d.hyperlinkServiceArticleId);
@@ -3693,6 +3717,7 @@ function collectPopupPrefs() {
     settingsActiveTab: getSettingsActiveTab(),
     prefsLayoutSchemaVersion: LAYOUT_PREFS_SCHEMA_VERSION,
     selectedPresetId: String(selectedPresetId || ""),
+    threadsChoice: normalizeThreadsChoice(outputPrefs.threadsChoice),
     priceThreshold: $("priceThreshold")?.value ?? String(DEFAULT_PRICE_THRESHOLD),
     minPriceThreshold: $("minPriceThreshold")?.value ?? String(DEFAULT_MIN_PRICE_THRESHOLD),
     vulnerableMinPriceThreshold:
@@ -3733,6 +3758,7 @@ async function restorePopupPrefs() {
   const { [POPUP_PREFS_KEY]: prefs } = await chrome.storage.local.get(POPUP_PREFS_KEY);
   const raw = prefs || {};
   selectedPresetId = typeof raw.selectedPresetId === "string" ? raw.selectedPresetId : "";
+  outputPrefs.threadsChoice = normalizeThreadsChoice(raw.threadsChoice);
   const restoredPriceThreshold = Number(raw.priceThreshold);
   outputPrefs.priceThreshold =
     Number.isFinite(restoredPriceThreshold) && restoredPriceThreshold >= 0
@@ -4694,6 +4720,7 @@ $("run").addEventListener("click", async () => {
       sourceMode: getActiveModeKey(),
       sourceName: getActiveSourceName(),
       sourceVisibleCount: getActiveSourceVisibleCount(),
+      threads: getManualThreadsCount(),
       opsWarehouses: getOpsWarehousesList(),
       aggressiveMode: outputPrefs.aggressiveMode === true,
     });
@@ -4927,6 +4954,12 @@ $("clearMem").addEventListener("click", async () => {
   showAppToast("Память ID сброшена.", 3200);
 });
 
+$("threadsChoice")?.addEventListener("change", async () => {
+  outputPrefs.threadsChoice = normalizeThreadsChoice($("threadsChoice")?.value);
+  applyThreadsChoiceToDom();
+  await savePopupPrefs();
+});
+
 $("priceThreshold").addEventListener("input", () => {
   outputPrefs.priceThreshold = Math.max(0, Number($("priceThreshold").value) || 0);
   refreshCopyButtonsText();
@@ -5024,6 +5057,7 @@ function resetExtensionStateToFactory() {
     layoutGe: [],
     layoutLt: [],
     opsWarehouses: [""],
+    threadsChoice: "auto",
     uiGradient: true,
     aggressiveMode: false,
     excludeMemoryIds: false,

@@ -78,8 +78,17 @@ function computeAutoThreads(itemCount) {
   return Math.max(1, threads);
 }
 
-function createSpeedController(maxThreads) {
+function parseManualThreads(value) {
+  const n = Math.floor(Number(value) || 0);
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(12, n);
+}
+
+function createSpeedController(maxThreads, opts = {}) {
   const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  // fixedThreads: пользователь выбрал число потоков вручную — контроллер
+  // адаптирует только паузы, а число потоков не трогает.
+  const fixedThreads = opts.fixedThreads === true;
   const st = {
     maxThreads: Math.max(1, Math.floor(Number(maxThreads) || 1)),
     threadLimit: Math.max(1, Math.floor(Number(maxThreads) || 1)),
@@ -107,7 +116,7 @@ function createSpeedController(maxThreads) {
         st.failStreak = 0;
         st.settleMs = clampNum(st.settleMs * 0.93 - 8, SPEED_MIN_SETTLE_MS, SPEED_MAX_SETTLE_MS);
         st.delayMs = clampNum(st.delayMs - 35, SPEED_MIN_DELAY_MS, SPEED_MAX_DELAY_MS);
-        if (st.okStreak >= 10 && st.threadLimit < st.maxThreads) {
+        if (!fixedThreads && st.okStreak >= 10 && st.threadLimit < st.maxThreads) {
           st.threadLimit += 1;
           st.okStreak = 0;
         }
@@ -117,7 +126,7 @@ function createSpeedController(maxThreads) {
         st.slowStreak += 1;
         st.settleMs = clampNum(st.settleMs * 1.2 + 120, SPEED_MIN_SETTLE_MS, SPEED_MAX_SETTLE_MS);
         st.delayMs = clampNum(st.delayMs + 60, SPEED_MIN_DELAY_MS, SPEED_MAX_DELAY_MS);
-        if (st.slowStreak >= 6 && st.threadLimit > 2) {
+        if (!fixedThreads && st.slowStreak >= 6 && st.threadLimit > 2) {
           st.threadLimit -= 1;
           st.slowStreak = 0;
         }
@@ -127,7 +136,7 @@ function createSpeedController(maxThreads) {
         st.failStreak += 1;
         st.settleMs = clampNum(st.settleMs * 1.45 + 200, SPEED_MIN_SETTLE_MS, SPEED_MAX_SETTLE_MS);
         st.delayMs = clampNum(st.delayMs + 150, SPEED_MIN_DELAY_MS, SPEED_MAX_DELAY_MS);
-        if ((hardFail || st.failStreak >= 2) && st.threadLimit > 1) {
+        if (!fixedThreads && (hardFail || st.failStreak >= 2) && st.threadLimit > 1) {
           st.threadLimit -= 1;
           st.failStreak = 0;
         }
@@ -1245,6 +1254,7 @@ async function tryResumePausedJob(mode = "file") {
       await runJobFromState({
         sourceMode: key,
         sourceName: job.sourceName || "",
+        manualThreads: parseManualThreads(job.manualThreads),
         aggressiveMode: job.aggressiveMode === true,
         opsWarehouses,
         toFetch: remaining,
@@ -1801,8 +1811,11 @@ async function runJobFromState(startPayload) {
   touchWorkerHeartbeat(mode);
   await ensureKeepAliveAlarm();
 
-  const threads = computeAutoThreads(toFetch.length);
-  const speedCtl = createSpeedController(threads);
+  const manualThreads = parseManualThreads(startPayload.manualThreads);
+  const threads = manualThreads
+    ? Math.max(1, Math.min(manualThreads, Math.max(1, toFetch.length)))
+    : computeAutoThreads(toFetch.length);
+  const speedCtl = createSpeedController(threads, { fixedThreads: manualThreads > 0 });
   const runConfig = {
     aggressiveMode: aggressiveMode === true,
   };
@@ -1826,7 +1839,8 @@ async function runJobFromState(startPayload) {
     abortRequested: false,
     sourceMode: sourceMode === "text" ? "text" : "file",
     sourceName,
-    autoSpeed: true,
+    autoSpeed: manualThreads === 0,
+    manualThreads,
     speed: speedCtl.snapshot(),
     aggressiveMode: runConfig.aggressiveMode,
     threads,
@@ -2509,6 +2523,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await runJobFromState({
         sourceMode,
         sourceName,
+        manualThreads: parseManualThreads(msg.threads),
         aggressiveMode,
         opsWarehouses,
         toFetch,

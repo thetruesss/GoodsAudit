@@ -426,6 +426,37 @@
           <div id="settingsPanelGeneral" class="settings-tab-panel" role="tabpanel" aria-labelledby="settingsTabGeneral">
             <div class="controls settings-controls">
               <section class="settings-group">
+                <h3 class="settings-group-title">Скорость обработки</h3>
+                <label class="field field-with-help">
+                  <span class="field-label-row">
+                    <span class="field-label">Потоки (вкладки)</span>
+                    <span
+                      class="field-help"
+                      tabindex="0"
+                      role="button"
+                      aria-label="Справка: потоки"
+                      data-tip="Авто — расширение само подбирает число потоков под ваш ПК и меняет его во время обработки. Вручную — фиксированное число вкладок: больше — быстрее, но тяжелее для браузера."
+                      >?</span>
+                  </span>
+                  <select id="threadsChoice" class="select-oz" aria-label="Число потоков">
+                    <option value="auto">Авто (рекомендуется)</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="8">8</option>
+                    <option value="9">9</option>
+                    <option value="10">10</option>
+                    <option value="11">11</option>
+                    <option value="12">12</option>
+                  </select>
+                </label>
+              </section>
+
+              <section class="settings-group">
                 <h3 class="settings-group-title">Пороги цен, ₽</h3>
               <label id="priceThresholdField" class="field field-with-help">
                 <span class="field-label-row">
