@@ -352,7 +352,53 @@
 
       <div id="panelSettings" class="settings-panel" role="region" aria-label="Настройки" hidden>
         <section class="card">
-          <h2 class="h2 settings-heading">Настройки</h2>
+          <div class="settings-heading-row">
+            <h2 class="h2 settings-heading">Настройки</h2>
+            <span class="settings-autosave-note">Сохраняются автоматически</span>
+          </div>
+
+          <div class="preset-bar">
+            <div class="preset-bar-head">
+              <span class="preset-bar-title">Пресеты настроек</span>
+              <span
+                class="field-help"
+                tabindex="0"
+                role="button"
+                aria-label="Справка: пресеты настроек"
+                data-tip="Пресет — сохранённый набор настроек: пороги цен, колонки таблицы, склады и переключатели. Сохраните текущие настройки под именем и переключайтесь между профилями в один клик, без перенастройки."
+                >?</span>
+            </div>
+            <div class="preset-bar-row">
+              <select id="presetSelect" class="select-oz preset-select" aria-label="Выбор пресета">
+                <option value="">— выберите пресет —</option>
+              </select>
+              <button id="btnApplyPreset" type="button" class="btn btn-primary btn-sm" disabled>
+                Применить
+              </button>
+            </div>
+            <div class="preset-bar-actions">
+              <button id="btnSavePreset" type="button" class="btn btn-secondary btn-sm">
+                + Сохранить текущие
+              </button>
+              <button
+                id="btnUpdatePreset"
+                type="button"
+                class="btn btn-ghost btn-sm"
+                disabled
+                title="Перезаписать выбранный пресет текущими настройками"
+              >
+                Обновить
+              </button>
+              <button
+                id="btnDeletePreset"
+                type="button"
+                class="btn btn-ghost btn-sm preset-delete"
+                disabled
+              >
+                Удалить
+              </button>
+            </div>
+          </div>
 
           <div class="settings-tabs" role="tablist" aria-label="Разделы настроек">
             <button
@@ -379,51 +425,21 @@
 
           <div id="settingsPanelGeneral" class="settings-tab-panel" role="tabpanel" aria-labelledby="settingsTabGeneral">
             <div class="controls settings-controls">
-              <label class="field field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">Потоки (вкладки)</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: потоки"
-                    data-tip="Сколько вкладок в отдельном окне. Больше — быстрее, но тяжелее для браузера."
-                    >?</span>
-                </span>
-                <input
-                  id="threads"
-                  type="number"
-                  min="1"
-                  max="12"
-                  value="5"
-                />
-              </label>
-              <label class="field field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">Пауза, мс</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: пауза"
-                    data-tip="Пауза между карточками в одном потоке. Меньше — быстрее, больше — спокойнее для сайта."
-                    >?</span>
-                </span>
-                <input id="delayMs" type="number" min="0" max="5000" value="750" />
-              </label>
-              <label class="field field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">После загрузки, мс</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: после загрузки"
-                    data-tip="Ждём после открытия карточки. Подними, если часто пустые данные."
-                    >?</span>
-                </span>
-                <input id="settleMs" type="number" min="0" max="10000" value="750" />
-              </label>
+              <section class="settings-group">
+                <h3 class="settings-group-title">Скорость обработки</h3>
+                <div class="speed-auto-card">
+                  <span class="speed-auto-icon" aria-hidden="true">⚡</span>
+                  <span class="speed-auto-text">
+                    <strong>Авто-скорость включена.</strong>
+                    Расширение само подбирает число потоков и паузы под мощность вашего ПК и
+                    скорость интернета — и подстраивает их на лету во время обработки.
+                    Настраивать ничего не нужно.
+                  </span>
+                </div>
+              </section>
+
+              <section class="settings-group">
+                <h3 class="settings-group-title">Пороги цен, ₽</h3>
               <label id="priceThresholdField" class="field field-with-help">
                 <span class="field-label-row">
                   <span class="field-label">Порог цены, ₽</span>
@@ -463,6 +479,10 @@
                 </span>
                 <input id="vulnerableMinPriceThreshold" type="number" min="0" step="1" value="0" />
               </label>
+              </section>
+
+              <section class="settings-group">
+                <h3 class="settings-group-title">Поведение и вид</h3>
               <div class="field field-toggle">
                 <span class="field-label">Стиль расширения</span>
                 <div class="field-toggle-row">
@@ -548,61 +568,32 @@
                   </div>
                 </div>
               </div>
+              </section>
+
+              <section class="settings-group">
+                <h3 class="settings-group-title">Фильтр опер. складов</h3>
+                <p class="settings-group-hint">
+                  Обрабатываются только постинги с этих складов. Пустой список — без фильтра,
+                  берём все склады.
+                </p>
               <div class="field">
-                <span class="field-label">Список опер. складов</span>
                 <div id="opsWarehousesList" class="ops-list"></div>
                 <div class="actions">
                   <button id="btnAddOpsWarehouse" type="button" class="btn btn-secondary btn-sm">
-                    + Добавить
+                    + Добавить склад
                   </button>
                 </div>
               </div>
-              <div class="settings-layout-io">
-                <button id="btnExportTableColumns" type="button" class="btn btn-secondary btn-sm btn-with-icon">
-                  <svg
-                    class="btn-with-icon__svg"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M5 8c0-2.2 3.1-4 7-4s7 1.8 7 4" />
-                    <path d="M12 20V11" />
-                    <path d="M8 15l4-4 4 4" />
-                  </svg>
-                  Экспорт колонок таблицы
-                </button>
-                <button id="btnImportTableColumns" type="button" class="btn btn-secondary btn-sm btn-with-icon">
-                  <svg
-                    class="btn-with-icon__svg"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M5 16c0 2.2 3.1 4 7 4s7-1.8 7-4" />
-                    <path d="M12 4v9" />
-                    <path d="M8 9l4 4 4-4" />
-                  </svg>
-                  Импорт колонок таблицы
-                </button>
-                <input id="tableColumnsImportFile" type="file" accept=".json,application/json" hidden />
-              </div>
+              </section>
+
+              <section class="settings-group settings-group--danger">
+                <h3 class="settings-group-title">Сброс</h3>
               <div class="settings-cache-actions">
                 <button id="btnClearAllCache" type="button" class="btn btn-danger-outline btn-sm">
                   Очистить весь кэш
                 </button>
               </div>
+              </section>
             </div>
           </div>
 
@@ -628,11 +619,62 @@
                   aria-label="Удалённые колонки"
                 ></div>
               </div>
+              <div class="layout-io-inline">
+                <button
+                  id="btnExportTableColumns"
+                  type="button"
+                  class="btn btn-ghost btn-sm btn-with-icon"
+                  title="Сохранить колонки таблицы в файл JSON"
+                >
+                  <svg
+                    class="btn-with-icon__svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M5 8c0-2.2 3.1-4 7-4s7 1.8 7 4" />
+                    <path d="M12 20V11" />
+                    <path d="M8 15l4-4 4 4" />
+                  </svg>
+                  Экспорт
+                </button>
+                <button
+                  id="btnImportTableColumns"
+                  type="button"
+                  class="btn btn-ghost btn-sm btn-with-icon"
+                  title="Загрузить колонки таблицы из файла JSON"
+                >
+                  <svg
+                    class="btn-with-icon__svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M5 16c0 2.2 3.1 4 7 4s7-1.8 7-4" />
+                    <path d="M12 4v9" />
+                    <path d="M8 9l4 4 4-4" />
+                  </svg>
+                  Импорт
+                </button>
+                <input id="tableColumnsImportFile" type="file" accept=".json,application/json" hidden />
+              </div>
             </div>
             <p class="settings-tab-hint">
-              Поля — это вывод заготовленных, главных параметров.<br />
-              Столбец исходника — вывод информации из выбранного столбца, если проверка шла по файлу Excel.<br />
-              (Пусто) — в буфер обмена запишется пустая ячейка.
+              Каждая строка ниже — колонка при копировании в Excel (A, B, C…).
+              «Поля» — данные с карточки постинга, «Столбец исходника» — значение из вашего
+              файла, «(пусто)» — пустая ячейка. Перетаскивайте строки, чтобы менять порядок.
             </p>
             <div id="settingsLayoutScroll" class="settings-layout-scroll">
               <div class="layout-config">
