@@ -78,10 +78,12 @@ function computeAutoThreads(itemCount) {
   return Math.max(1, threads);
 }
 
+const MANUAL_THREADS_HARD_CAP = 25;
+
 function parseManualThreads(value) {
   const n = Math.floor(Number(value) || 0);
   if (!Number.isFinite(n) || n < 1) return 0;
-  return Math.min(12, n);
+  return Math.min(MANUAL_THREADS_HARD_CAP, n);
 }
 
 function createSpeedController(maxThreads, opts = {}) {
@@ -1378,7 +1380,7 @@ function isTrustedExtensionSender(sender) {
 }
 
 async function openWorkerWindow(threadCount, mode = "file", aggressiveMode = false) {
-  const n = Math.max(1, Math.min(12, Math.floor(Number(threadCount) || 1)));
+  const n = Math.max(1, Math.min(MANUAL_THREADS_HARD_CAP, Math.floor(Number(threadCount) || 1)));
   const bringToFront = Boolean(aggressiveMode);
   const win = await new Promise((resolve, reject) => {
     chrome.windows.create(
