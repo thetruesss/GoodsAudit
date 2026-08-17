@@ -3,6 +3,7 @@
     articleId: "Id постинга",
     operationalWarehouse: "Текущее местоположение постинга",
     shipment: "Номер постинга",
+    postingType: "Тип постинга",
   };
 
   const HEADER_ALIASES = {
@@ -40,6 +41,19 @@
       "posting number",
       "shipment",
       "номер отправления",
+    ],
+    postingType: [
+      "тип постинга",
+      "тип отправления",
+      "вид отправления",
+      "тип экземпляра",
+      "тип грузоместа",
+      "вид грузоместа",
+      "тип объекта",
+      "тип тары",
+      "item type",
+      "posting type",
+      "cargo type",
     ],
     warehouse: ["склад", "warehouse", "локац"],
   };
@@ -250,13 +264,69 @@
     return /^[А-Яа-яЁё]{2,}-\d/.test(s);
   }
 
-  function isExcludedPostingId(v) {
+  function isUnsupportedShipmentIdPrefix(v) {
     const s = normalizePostingValue(v);
+    if (!s) return false;
     if (/^BT/i.test(s)) return true;
     if (/^G/i.test(s) && s.length >= 10) return true;
+    return false;
+  }
+
+  function isExcludedPostingId(v) {
+    const s = normalizePostingValue(v);
+    if (isUnsupportedShipmentIdPrefix(s)) return true;
     if (/^выгрузк/i.test(s)) return true;
     if (isCyrillicOperationalCode(s)) return true;
     return false;
+  }
+
+  function normalizeTypeLabel(v) {
+    return String(v || "")
+      .trim()
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .replace(/[._-]+/g, " ")
+      .replace(/\s+/g, " ");
+  }
+
+  const UNSUPPORTED_TYPE_EXACT = new Set(["bag", "тара"]);
+  const UNSUPPORTED_TYPE_PREFIXES = [
+    "палет",
+    "паллет",
+    "pallet",
+    "контейнер",
+    "container",
+    "тоут",
+    "tote",
+    "тележк",
+    "роллкейдж",
+    "rollcage",
+    "roll cage",
+    "мешок",
+    "gaylord",
+  ];
+
+  function isUnsupportedPostingTypeLabel(v) {
+    const t = normalizeTypeLabel(v);
+    if (!t) return false;
+    if (t.includes("неподдерживаем")) return true;
+    const compact = t.replace(/\s+/g, "");
+    if (UNSUPPORTED_TYPE_EXACT.has(t) || UNSUPPORTED_TYPE_EXACT.has(compact)) return true;
+    for (const prefix of UNSUPPORTED_TYPE_PREFIXES) {
+      const n = prefix.replace(/\s+/g, "");
+      if (t === prefix || compact === n) return true;
+      if (t.startsWith(`${prefix} `) || compact.startsWith(n)) return true;
+    }
+    return false;
+  }
+
+  function getUnsupportedShipmentSkipReason(row) {
+    if (!row || typeof row !== "object") return "";
+    if (isUnsupportedShipmentIdPrefix(row.articleId) || isUnsupportedShipmentIdPrefix(row.shipmentSource)) {
+      return "unsupported-id";
+    }
+    if (isUnsupportedPostingTypeLabel(row.postingType)) return "unsupported-type";
+    return "";
   }
 
   function isDateLikeToken(v) {
@@ -398,7 +468,7 @@
     return String(cells[idx] ?? "").trim();
   }
 
-  function detectHeaderRow(cellRows, articleHints, opsHints, shipmentHints, warehouseHints) {
+  function detectHeaderRow(cellRows, articleHints, opsHints, shipmentHints, warehouseHints, typeHints) {
     const rows = Array.isArray(cellRows) ? cellRows : [];
     const limit = Math.min(rows.length, 80);
     let bestIdx = -1;
@@ -413,6 +483,7 @@
       const shipmentIdx = detectColumnIndex(cells, shipmentHints, headerOpts);
       const opsIdx = detectColumnIndex(cells, opsHints, headerOpts);
       const warehouseIdx = detectColumnIndex(cells, warehouseHints, headerOpts);
+      const typeIdx = detectColumnIndex(cells, typeHints, headerOpts);
 
       // Single-column ID headers (just "Идентификатор") are valid.
       if (nonEmpty < 2 && !(nonEmpty === 1 && articleIdx >= 0)) continue;
@@ -421,6 +492,7 @@
       if (articleIdx >= 0) score += 7;
       if (shipmentIdx >= 0) score += 6;
       if (opsIdx >= 0) score += 2;
+      if (typeIdx >= 0) score += 2;
       if (warehouseIdx >= 0) score += 1;
 
       // Prefer compact label rows over sparse/noisy ones when scores tie-break upward.
@@ -459,13 +531,15 @@
     const normalizedOpsHints = normalizeHints(HEADER_ALIASES.operationalWarehouse);
     const normalizedShipmentHints = normalizeHints(HEADER_ALIASES.shipment);
     const normalizedWarehouseHints = normalizeHints(HEADER_ALIASES.warehouse);
+    const normalizedTypeHints = normalizeHints(HEADER_ALIASES.postingType);
 
     const headerRow = detectHeaderRow(
       cellRows,
       normalizedArticleHints,
       normalizedOpsHints,
       normalizedShipmentHints,
-      normalizedWarehouseHints
+      normalizedWarehouseHints,
+      normalizedTypeHints
     );
     const hasHeader = headerRow.idx >= 0;
 
@@ -479,6 +553,11 @@
         : -1;
     const shipmentIdx =
       hasHeader ? detectExactColumnIndex(headerCells, FIXED_HEADER_NAMES.shipment) : -1;
+    let postingTypeIdx =
+      hasHeader ? detectExactColumnIndex(headerCells, FIXED_HEADER_NAMES.postingType) : -1;
+    if (postingTypeIdx < 0 && hasHeader) {
+      postingTypeIdx = detectColumnIndex(headerCells, normalizedTypeHints);
+    }
     const warehouseIdx = hasHeader ? detectColumnIndex(headerCells, normalizedWarehouseHints) : -1;
     const headerIdColumns = hasHeader
       ? [...new Set([
@@ -514,10 +593,12 @@
       const warehouse = warehouseIdx >= 0 ? String(cells[warehouseIdx] || "").trim() : "";
       const operationalWarehouse = extractNamedValue(cells, operationalWarehouseIdx);
       const shipmentSource = extractNamedValue(cells, shipmentIdx);
+      const postingType = extractNamedValue(cells, postingTypeIdx);
       const sourceNamed = {
         articleId,
         operationalWarehouse,
         shipment: shipmentSource,
+        postingType,
       };
       if (wantCells) {
         return {
@@ -525,11 +606,12 @@
           articleId,
           operationalWarehouse,
           shipmentSource,
+          postingType,
           sourceNamed,
           sourceCells: cells.slice(),
         };
       }
-      return { warehouse, articleId, operationalWarehouse, shipmentSource, sourceNamed };
+      return { warehouse, articleId, operationalWarehouse, shipmentSource, postingType, sourceNamed };
     }
 
     for (let i = startFrom; i < cellRows.length; i++) {
@@ -606,4 +688,5 @@
   };
 
   globalThis.__returnsLooksLikeId = looksLikeId;
+  globalThis.__returnsGetUnsupportedShipmentSkipReason = getUnsupportedShipmentSkipReason;
 })();

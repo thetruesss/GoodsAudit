@@ -982,6 +982,17 @@ function isValidArticleIdForFetch(articleId) {
     : false;
 }
 
+function getUnsupportedShipmentSkipReason(row) {
+  return typeof globalThis.__returnsGetUnsupportedShipmentSkipReason === "function"
+    ? String(globalThis.__returnsGetUnsupportedShipmentSkipReason(row) || "")
+    : "";
+}
+
+function pushUnsupportedTypeSkip(job, articleId) {
+  if (!Array.isArray(job.skippedOpsWarehouse)) job.skippedOpsWarehouse = [];
+  job.skippedOpsWarehouse.push(`Неподдерживаемый тип: ${articleId}`);
+}
+
 function buildJobResultRow(item, data) {
   const fetchId = String(item.articleId || "").trim();
   const scrapedId = String(data.articleId || "").trim();
@@ -1093,14 +1104,17 @@ async function rebuildToFetchFromSourceForJob(mode, job) {
     }
     const toFetch = [];
     for (const row of byArticle.values()) {
-      const { warehouse, articleId, operationalWarehouse, shipmentSource } = row;
+      const { warehouse, articleId, operationalWarehouse, shipmentSource, postingType } = row;
       if (processedIds.has(String(articleId || "").trim())) continue;
-      toFetch.push({
+      const item = {
         warehouse,
         articleId,
         operationalWarehouse,
         shipmentSource: String(shipmentSource || ""),
-      });
+        postingType: String(postingType || ""),
+      };
+      if (getUnsupportedShipmentSkipReason(item)) continue;
+      toFetch.push(item);
     }
     return toFetch;
   } catch {
@@ -1962,6 +1976,15 @@ async function runJobFromState(startPayload) {
           continue;
         }
 
+        if (getUnsupportedShipmentSkipReason(item)) {
+          pushUnsupportedTypeSkip(job, item.articleId);
+          await addProcessedIds([item.articleId]);
+          job.currentIndex =
+            job.results.length + job.errors.length + (job.skippedOpsWarehouse?.length || 0);
+          await persistJob(job, mode);
+          continue;
+        }
+
         await ensureTabNotDiscarded(workerTabId).catch(() => {});
         if (runConfig.aggressiveMode) {
           await bringWorkerTabToFront(state.workerWindowId, workerTabId);
@@ -2487,20 +2510,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const skippedMem = [];
       const skippedMemIds = [];
+      const skippedOpsWarehouse = [];
+      const skippedTypeIds = [];
       const toFetch = [];
       for (const row of byArticle.values()) {
-        const { warehouse, articleId, operationalWarehouse, shipmentSource } = row;
+        const { warehouse, articleId, operationalWarehouse, shipmentSource, postingType } = row;
         if (processed.has(String(articleId || "").trim())) {
           skippedMem.push(`Уже в памяти: ${articleId}`);
           skippedMemIds.push(articleId);
           continue;
         }
-        toFetch.push({
+        const item = {
           warehouse,
           articleId,
           operationalWarehouse,
           shipmentSource: String(shipmentSource || ""),
-        });
+          postingType: String(postingType || ""),
+        };
+        if (getUnsupportedShipmentSkipReason(item)) {
+          skippedOpsWarehouse.push(`Неподдерживаемый тип: ${articleId}`);
+          skippedTypeIds.push(articleId);
+          continue;
+        }
+        toFetch.push(item);
+      }
+      if (skippedTypeIds.length) {
+        await addProcessedIds(skippedTypeIds);
+        await flushProcessedIds(true).catch(() => {});
       }
 
       const cachedResults = (await loadCachedResultsForIds(skippedMemIds)).map((row) => ({
@@ -2509,7 +2545,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }));
 
       const sourceVisibleCount = Math.max(0, Number(msg.sourceVisibleCount) || 0);
-      const plannedTotal = cachedResults.length + toFetch.length;
+      const plannedTotal = cachedResults.length + toFetch.length + skippedOpsWarehouse.length;
       const inputStats = {
         sourceVisibleCount,
         totalNonEmptyLines: parsed.totalNonEmptyLines,
@@ -2517,6 +2553,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         missingIdRows: parsed.missingIdRows,
         duplicateRows: skippedDupSource.length,
         skippedMemRows: skippedMem.length,
+        skippedTypeRows: skippedOpsWarehouse.length,
         uniqueRows: byArticle.size,
         toFetchRows: plannedTotal,
         remainingRows: toFetch.length,
@@ -2531,7 +2568,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         toFetch,
         skippedMem,
         skippedDupSource,
-        skippedOpsWarehouse: [],
+        skippedOpsWarehouse,
         inputStats,
         initialResults: cachedResults,
         initialToFetchTotal: plannedTotal,

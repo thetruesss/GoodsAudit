@@ -2557,6 +2557,7 @@ function buildSourceExportDataFromMergedMap(mergedById, headerCells, sourceTextK
         articleId,
         operationalWarehouse: String(row.operationalWarehouse || ""),
         shipment: String(row.shipmentSource || ""),
+        postingType: String(row.postingType || ""),
       },
     };
     rowsByArticle.set(articleId, payload);
@@ -2752,9 +2753,12 @@ function formatStatus(job) {
     const noId = Number(stats.missingIdRows) || 0;
     const dup = Number(stats.duplicateRows) || 0;
     const mem = Number(stats.skippedMemRows) || 0;
+    const typeSkip = Number(stats.skippedTypeRows) || 0;
     const plan = Number(stats.toFetchRows) || total;
     lines.push(
-      `\nСтроки: непустых ${nonEmpty}, с ID ${withId}, без ID ${noId}, дубли ${dup}, уже в памяти ${mem}, к обработке ${plan}.`
+      `\nСтроки: непустых ${nonEmpty}, с ID ${withId}, без ID ${noId}, дубли ${dup}, уже в памяти ${mem}` +
+        (typeSkip > 0 ? `, неподдерживаемый тип ${typeSkip}` : "") +
+        `, к обработке ${plan}.`
     );
   }
   if (job.sourceName) lines.push(`\nФайл: ${job.sourceName}`);
@@ -4192,6 +4196,7 @@ function mergeParsedRowsById(mergedById, parsedRows) {
       articleId: id,
       operationalWarehouse: String(row?.operationalWarehouse || ""),
       shipmentSource: String(row?.shipmentSource || ""),
+      postingType: String(row?.postingType || ""),
       sourceCells: Array.isArray(row.sourceCells) ? row.sourceCells.slice() : [],
     });
     added += 1;
@@ -4240,6 +4245,7 @@ async function extractWorkbookSourceData(wb) {
           articleId: id,
           operationalWarehouse: String(row?.operationalWarehouse || ""),
           shipmentSource: String(row?.shipmentSource || ""),
+          postingType: String(row?.postingType || ""),
           sourceCells: Array.isArray(row.sourceCells) ? row.sourceCells.slice() : [],
         });
       }
