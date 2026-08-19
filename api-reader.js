@@ -1,20 +1,36 @@
-// Оркестратор чтения одной карточки: probe → on → off с обучением маппинга,
-// периодической сверкой и автоматическим фолбэком на страницу. Браузерные
-// примитивы (скрейп DOM, снятие трафика, повтор запроса, переучивание токена)
-// инъектируются, поэтому модуль тестируется с фейками и не зависит от chrome.*.
+// Оркестратор чтения одной карточки returns.o3t.ru.
+//
+// Логика по объекту:
+//   1) узнаём тип отправления (get-article-type);
+//   2) неподдерживаемые типы (не posting/exemplar/boxTransit) закрываем сразу —
+//      страница на них всё равно показывает «Неподдерживаемый тип»;
+//   3) поддерживаемые читаем ручками профиля и приводим к тому же снапшоту,
+//      который отдаёт DOM-скрейпер.
+//
+// У каждого типа своя машина состояний probe → on → off: пока тип не подтвердил
+// побайтный паритет с DOM на живых данных, он читается страницей. Сбой одного
+// типа не отключает быстрое чтение остальных.
+//
+// Браузерные примитивы инъектируются, поэтому модуль тестируется с фейками и
+// не зависит от chrome.*.
 (function (root, factory) {
-  const api = factory(root.__gaApiMapping || (typeof require === "function" ? require("./api-mapping.js") : null));
+  const api = factory(
+    root.__gaApiMapping || (typeof require === "function" ? require("./api-mapping.js") : null),
+    root.__gaApiReturns || (typeof require === "function" ? require("./api-returns.js") : null)
+  );
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.__gaApiReader = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function (M) {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (M, RT) {
   const DEFAULTS = {
     verifyEveryN: 25, // как часто в режиме on контрольно сверять API с DOM
+    okProbesToEnable: 2, // сколько удачных сверок подряд включают тип
     maxProbeFails: 2,
     maxRelearnFails: 2,
     maxMiscompares: 2,
-    requireOpsField: false, // при активном фильтре складов маппинг обязан знать склад
     opsWarehouses: [], // список опер. складов пользователя для паритета фильтра
   };
+
+  const UNSUPPORTED_CHANNEL = "unsupported";
 
   function snapshotFromDomData(data) {
     // DOM-скрейпер возвращает уже готовый снапшот; берём поля как есть.
@@ -28,34 +44,54 @@
   function createHubApiReader(deps, options) {
     const opts = Object.assign({}, DEFAULTS, options || {});
     const log = typeof deps.log === "function" ? deps.log : function () {};
-    const controller = M.createApiModeController({
-      maxProbeFails: opts.maxProbeFails,
-      maxRelearnFails: opts.maxRelearnFails,
-      maxMiscompares: opts.maxMiscompares,
-    });
-
-    let template = null;
-    let mapping = null;
-    let authHeaders = {};
-    let onCounter = 0;
-    // Промежуточные данные обучения между первым и вторым probe-объектом.
-    let probeLearned = null; // { template, fieldCandidates }
     const opsList = Array.isArray(opts.opsWarehouses) ? opts.opsWarehouses : [];
 
-    function haveApiConfig() {
-      return Boolean(template && mapping);
+    // Отдельная машина состояний на каждый «канал» (тип отправления) плюс свой
+    // счётчик прочитанного — чтобы редкий тип тоже регулярно сверялся с DOM.
+    const channels = new Map();
+    const channelCounters = new Map();
+    function channelFor(name) {
+      const key = String(name || "unknown");
+      if (!channels.has(key)) {
+        channels.set(
+          key,
+          M.createApiModeController({
+            okProbesToEnable: opts.okProbesToEnable,
+            maxProbeFails: opts.maxProbeFails,
+            maxRelearnFails: opts.maxRelearnFails,
+            maxMiscompares: opts.maxMiscompares,
+          })
+        );
+        channelCounters.set(key, 0);
+      }
+      return channels.get(key);
+    }
+    function bumpChannelCounter(name) {
+      const key = String(name || "unknown");
+      const next = (channelCounters.get(key) || 0) + 1;
+      channelCounters.set(key, next);
+      return next;
+    }
+    function channelCounter(name) {
+      return channelCounters.get(String(name || "unknown")) || 0;
+    }
+    // Ошибка чтения по каналу: на probe это неудачная проба, в режиме on —
+    // расхождение доверия. Без этого сломанная ручка никогда не отключалась бы.
+    function reportChannelFailure(name, reason) {
+      const ctl = channelFor(name);
+      const phase = ctl.getPhase();
+      if (phase === "probe") ctl.probeFail(reason);
+      else if (phase === "on") ctl.miscompare();
+      if (ctl.getPhase() === "off") {
+        log(`API: отключаю тип «${name}» (${ctl.getReason() || reason}) — дальше страницами.`);
+      }
+      return ctl.getPhase();
     }
 
-    // Приводит сырой API-снапшот к тому виду, что даёт DOM: склад проходит тот же
-    // фильтр опер. складов, operationalWarehouseSeen отражает наличие склада.
-    function apiDataFromSnapshot(snapshot) {
-      const ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsList);
-      return Object.assign({}, snapshot, {
-        operationalWarehouse: ops.matched,
-        operationalWarehouseSeen: ops.seen,
-        unsupportedTransitBox: false,
-      });
-    }
+    let authHeaders = {};
+    let domainKnownOk = false;
+    // Тип уже известен по объекту — не тратим лишний запрос при повторном заходе.
+    const typeCache = new Map();
 
     function absorbAuthFromEntries(entries) {
       const fresh = M.latestAuthHeaders(entries);
@@ -66,117 +102,47 @@
       return false;
     }
 
-    // Единичный API-запрос за объектом item. Возвращает
-    // { ok, snapshot?, status, needRelearn?, error? }.
-    async function apiReadOne(item) {
-      if (!haveApiConfig()) return { ok: false, status: 0, error: "no-config" };
-      const req = M.applyRequestTemplate(template, item.articleId);
-      if (!req || !req.url) return { ok: false, status: 0, error: "bad-template" };
+    async function refreshAuthFromPage() {
+      try {
+        const entries = await deps.captureAndClear();
+        return absorbAuthFromEntries(entries);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // Один запрос к API. Возвращает { ok, body?, status, needRelearn? }.
+    async function apiGet(request) {
+      if (!request || !request.url) return { ok: false, status: 0, error: "bad-request" };
       let res;
       try {
-        res = await deps.replay(req, authHeaders);
+        res = await deps.replay(request, authHeaders);
       } catch (e) {
         return { ok: false, status: 0, error: String((e && e.message) || e) };
       }
       const status = Number(res?.status) || 0;
-      if (status === 401 || status === 403) {
-        return { ok: false, status, needRelearn: true };
-      }
-      if (status !== 200 || res?.body == null) {
-        return { ok: false, status, error: "http-" + status };
-      }
-      const extracted = M.extractSnapshotByMapping(res.body, mapping);
-      if (!extracted.ok || !M.extractedSnapshotLooksSane(extracted.snapshot)) {
-        return { ok: false, status, error: "extract-failed" };
-      }
-      return { ok: true, status, snapshot: extracted.snapshot };
+      if (status === 401 || status === 403) return { ok: false, status, needRelearn: true };
+      if (status !== 200 || res?.body == null) return { ok: false, status, error: "http-" + status };
+      return { ok: true, status, body: res.body };
     }
 
     async function relearnToken(reasonNames) {
       log(
-        "HUB API: обновляю токен через страницу" +
+        "API: обновляю сессию через страницу" +
           (reasonNames ? " (заголовки: " + reasonNames + ")" : "")
       );
+      let navigated = false;
       try {
         await deps.relearnToken();
+        navigated = true;
       } catch (e) {}
-      let entries = [];
-      try {
-        entries = await deps.captureAndClear();
-      } catch (e) {}
-      absorbAuthFromEntries(entries);
-      controller.relearnDone();
+      await refreshAuthFromPage();
+      // Домен считаем подтверждённым только если переход действительно удался:
+      // иначе вкладка могла остаться где угодно (например, после пересоздания).
+      domainKnownOk = navigated;
+      for (const ctl of channels.values()) ctl.relearnDone();
     }
 
-    // --- probe: читаем DOM как раньше и параллельно учимся ------------------
-    async function probeRead(item) {
-      const data = await deps.domScrape(item);
-      const snapshot = snapshotFromDomData(data);
-      let entries = [];
-      try {
-        entries = await deps.captureAndClear();
-      } catch (e) {}
-      absorbAuthFromEntries(entries);
-
-      try {
-        if (!probeLearned) {
-          const learned = M.learnFromEntries(entries, item.articleId, snapshot);
-          if (learned) {
-            probeLearned = { template: learned.template, fieldCandidates: learned.fieldCandidates };
-          } else {
-            controller.probeFail("learn-failed");
-          }
-        } else {
-          // Второй объект: параметризуем шаблон его ID, тянем API и сверяем.
-          const req = M.applyRequestTemplate(probeLearned.template, item.articleId);
-          const probeAuth = Object.keys(authHeaders).length
-            ? authHeaders
-            : M.latestAuthHeaders(entries);
-          let res = null;
-          if (req && req.url) {
-            try {
-              res = await deps.replay(req, probeAuth);
-            } catch (e) {
-              res = null;
-            }
-          }
-          const status = Number(res?.status) || 0;
-          if (status === 200 && res?.body != null) {
-            const refined = M.refineMapping(probeLearned.fieldCandidates, res.body, snapshot);
-            if (refined.ok && opts.requireOpsField && !refined.mapping.operationalWarehouse) {
-              probeLearned = null;
-              controller.probeFail("ops-field-unmapped");
-            } else if (refined.ok) {
-              template = probeLearned.template;
-              mapping = refined.mapping;
-              authHeaders = Object.keys(probeAuth).length ? probeAuth : authHeaders;
-              controller.probeSuccess();
-              log(
-                "HUB API: включаю быстрое чтение (заголовки: " +
-                  Object.keys(authHeaders).join(", ") +
-                  ")"
-              );
-            } else {
-              probeLearned = null;
-              controller.probeFail("verify-mismatch:" + refined.mismatches.join(","));
-            }
-          } else {
-            probeLearned = null;
-            controller.probeFail("probe-http-" + status);
-          }
-        }
-      } catch (e) {
-        controller.probeFail("probe-error");
-      }
-
-      if (controller.getPhase() === "off") {
-        log("HUB API: остаюсь на чтении через страницу (" + controller.getReason() + ")");
-      }
-      return { snapshot, path: "dom", data };
-    }
-
-    // --- on: только API, с фолбэком и периодической сверкой ----------------
-    let domainKnownOk = false; // проверяем домен лениво: тег не уходит с origin сам
     async function ensureOnDomain() {
       if (domainKnownOk || typeof deps.isOnHubDomain !== "function") return;
       let onDomain = true;
@@ -187,81 +153,208 @@
       else await relearnToken();
     }
 
-    async function apiRead(item) {
-      // Первый запрос в режиме on (и после сбоев) проверяет, что вкладка на нужном
-      // origin — иначе гарантированный 401. Дальше не дёргаем на каждый объект.
-      await ensureOnDomain();
-
-      let attempt = await apiReadOne(item);
-      if (!attempt.ok && attempt.needRelearn) {
-        domainKnownOk = false;
-        controller.batch401();
-        if (controller.getPhase() === "off") {
-          log("HUB API: отключаю после повторного 401 — дальше страницами.");
-          return domReadWithData(item);
-        }
-        await relearnToken(Object.keys(authHeaders).join(", "));
-        domainKnownOk = true;
-        attempt = await apiReadOne(item);
-      }
-
-      if (!attempt.ok) {
-        // Разовый сбой конкретного объекта — читаем его страницей, режим не рушим.
-        domainKnownOk = false;
-        log("HUB API: объект " + item.articleId + " через страницу (" + (attempt.error || attempt.status) + ")");
-        return domReadWithData(item);
-      }
-
-      controller.batchOk();
-      onCounter += 1;
-      // Приводим к DOM-виду (фильтр склада, признак seen) СРАЗУ, чтобы и сверка,
-      // и результат работали с одинаковыми значениями.
-      const apiData = apiDataFromSnapshot(attempt.snapshot);
-
-      // Периодическая честная сверка: тот же объект и DOM, и API — поля обязаны
-      // совпасть, иначе тихо разъезжаемся.
-      if (opts.verifyEveryN > 0 && onCounter % opts.verifyEveryN === 0) {
-        try {
-          const domData = await deps.domScrape(item);
-          const domSnap = snapshotFromDomData(domData);
-          const cmp = M.snapshotsMatch(apiData, domSnap, M.nonEmptySnapshotFields(domSnap));
-          try {
-            const entries = await deps.captureAndClear();
-            absorbAuthFromEntries(entries);
-          } catch (e) {}
-          if (!cmp.ok) {
-            controller.miscompare();
-            log(
-              "HUB API: расхождение на сверке (" +
-                cmp.mismatches.join(",") +
-                ") — беру данные страницы" +
-                (controller.getPhase() === "off" ? ", API отключён" : "")
-            );
-            return { snapshot: domSnap, path: "dom", data: domData };
-          }
-        } catch (e) {}
-      }
-
-      return { snapshot: apiData, path: "api", data: apiData };
+    // Достаём тип отправления. null — узнать не удалось.
+    async function resolveArticleType(item) {
+      const key = String(item.articleId || "").trim();
+      if (typeCache.has(key)) return typeCache.get(key);
+      const res = await apiGet(RT.resolveTypeRequest(key));
+      if (!res.ok) return { failed: true, needRelearn: res.needRelearn === true, status: res.status };
+      const body = res.body || {};
+      const resolved = {
+        articleType: String(body.articleType || "").trim(),
+        articleId: String(body.articleId ?? "").trim() || key,
+      };
+      if (!resolved.articleType) return { failed: true, status: res.status };
+      typeCache.set(key, resolved);
+      return resolved;
     }
 
-    async function domReadWithData(item) {
+    // Дочитывание деталей по уже известному типу → сырой снапшот (как у DOM).
+    async function apiReadDetails(articleType, articleId) {
+      if (!RT.isSupportedType(articleType)) {
+        // Страница таким типам показывает «Неподдерживаемый тип» — повторяем.
+        return {
+          ok: true,
+          channel: UNSUPPORTED_CHANNEL,
+          articleType,
+          snapshot: RT.mapUnsupported(articleId),
+        };
+      }
+
+      const infoRes = await apiGet(RT.infoRequest(articleType, articleId));
+      if (!infoRes.ok) {
+        return { ok: false, needRelearn: infoRes.needRelearn === true, channel: articleType, error: infoRes.error || ("http-" + infoRes.status) };
+      }
+      // Неизвестный нам код статуса/схемы означает, что на странице будет
+      // подпись, которой у нас нет — такой объект честнее дочитать страницей.
+      if (RT.snapshotHasUnknownCodes(articleType, infoRes.body)) {
+        return { ok: false, channel: articleType, error: "unknown-code" };
+      }
+
+      let content = null;
+      const contentReq = RT.contentRequest(articleType, articleId);
+      if (contentReq) {
+        const contentRes = await apiGet(contentReq);
+        if (!contentRes.ok) {
+          return {
+            ok: false,
+            needRelearn: contentRes.needRelearn === true,
+            channel: articleType,
+            error: contentRes.error || ("http-" + contentRes.status),
+          };
+        }
+        content = contentRes.body;
+      }
+
+      const snapshot = RT.mapByType(articleType, infoRes.body, content);
+      if (!snapshot) return { ok: false, channel: articleType, error: "map-failed" };
+      return { ok: true, channel: articleType, articleType, snapshot };
+    }
+
+    // Приводит сырой снапшот к виду DOM: склад проходит тот же фильтр опер.
+    // складов, operationalWarehouseSeen отражает наличие склада на карточке,
+    // затем применяется та же нормализация, что и к данным со страницы.
+    function toDomShape(snapshot, item) {
+      const ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsList);
+      const withOps = Object.assign({}, snapshot, {
+        operationalWarehouse: ops.matched,
+        operationalWarehouseSeen: ops.seen,
+      });
+      if (typeof deps.normalize !== "function") return withOps;
+      return deps.normalize(withOps, item);
+    }
+
+    async function domRead(item) {
       const data = await deps.domScrape(item);
       return { snapshot: snapshotFromDomData(data), path: "dom", data };
     }
 
+    // Сравнение API и DOM по непустым полям DOM-эталона. Для неподдерживаемых
+    // типов сверяем сам факт «неподдерживаемый».
+    function compareWithDom(apiData, domData, channel) {
+      if (channel === UNSUPPORTED_CHANNEL) {
+        const domUnsupported = Boolean(domData?.unsupportedTransitBox);
+        return {
+          ok: domUnsupported === true,
+          mismatches: domUnsupported ? [] : ["unsupportedTransitBox"],
+        };
+      }
+      const domSnap = snapshotFromDomData(domData);
+      return M.snapshotsMatch(apiData, domSnap, M.nonEmptySnapshotFields(domSnap));
+    }
+
     async function read(item) {
-      const phase = controller.getPhase();
-      if (phase === "on") return apiRead(item);
-      if (phase === "probe") return probeRead(item);
-      return domReadWithData(item);
+      // Разрешение типа перестало работать (нет прав/ручка закрыта) — дальше
+      // только страницы, лишних запросов не делаем.
+      const resolveCtl = channelFor("resolve");
+      if (resolveCtl.getPhase() === "off") return domRead(item);
+
+      await ensureOnDomain();
+
+      // Шаг 1 — тип отправления (один лёгкий запрос).
+      let resolved = await resolveArticleType(item);
+      if (resolved?.failed && resolved.needRelearn) {
+        domainKnownOk = false;
+        resolveCtl.batch401();
+        if (resolveCtl.getPhase() !== "off") {
+          await relearnToken(Object.keys(authHeaders).join(", "));
+          resolved = await resolveArticleType(item);
+        }
+      }
+      if (!resolved || resolved.failed) {
+        reportChannelFailure("resolve", "resolve-failed");
+        if (resolveCtl.getPhase() === "off") {
+          log("API: не удалось определить тип отправления — дальше читаю страницами.");
+        }
+        return domRead(item);
+      }
+      resolveCtl.probeSuccess();
+      resolveCtl.batchOk();
+
+      // Шаг 2 — канал этого типа. У каждого неподдерживаемого типа свой канал:
+      // подтверждённый «pallet» не должен молча закрывать какой-нибудь другой тип.
+      const channel = RT.isSupportedType(resolved.articleType)
+        ? resolved.articleType
+        : `${UNSUPPORTED_CHANNEL}:${resolved.articleType || "unknown"}`;
+      const ctl = channelFor(channel);
+      if (ctl.getPhase() === "off") return domRead(item);
+
+      let attempt = await apiReadDetails(resolved.articleType, resolved.articleId);
+      if (!attempt.ok && attempt.needRelearn) {
+        domainKnownOk = false;
+        ctl.batch401();
+        if (ctl.getPhase() !== "off") {
+          await relearnToken(Object.keys(authHeaders).join(", "));
+          attempt = await apiReadDetails(resolved.articleType, resolved.articleId);
+        }
+      }
+
+      if (!attempt.ok) {
+        // «Неизвестный код» — свойство конкретного объекта, а не поломка канала:
+        // такой объект просто дочитываем страницей. Остальные сбои копятся и
+        // в итоге отключают тип.
+        if (attempt.error !== "unknown-code") {
+          reportChannelFailure(channel, attempt.error || "read-failed");
+        }
+        return domRead(item);
+      }
+
+      const phase = ctl.getPhase();
+      const apiData = toDomShape(attempt.snapshot, item);
+
+      // Канал ещё не подтверждён либо пришло время контрольной сверки —
+      // читаем то же самое страницей и сравниваем поле в поле.
+      const seenInChannel = channelCounter(channel);
+      const needVerify =
+        phase === "probe" ||
+        (opts.verifyEveryN > 0 && seenInChannel > 0 && seenInChannel % opts.verifyEveryN === 0);
+
+      if (needVerify) {
+        const domData = await deps.domScrape(item);
+        await refreshAuthFromPage();
+        const cmp = compareWithDom(apiData, domData, channel);
+        if (cmp.ok) {
+          if (phase === "probe") {
+            const next = ctl.probeSuccess();
+            if (next === "on") {
+              log(
+                `API: включаю быстрое чтение для типа «${channel}» ` +
+                  `(заголовки: ${Object.keys(authHeaders).join(", ") || "нет"})`
+              );
+            }
+          } else {
+            ctl.batchOk();
+          }
+        } else {
+          if (phase === "probe") {
+            ctl.probeFail("verify:" + cmp.mismatches.join(","));
+          } else {
+            ctl.miscompare();
+          }
+          log(
+            `API: расхождение с страницей по типу «${channel}» ` +
+              `(${cmp.mismatches.join(",")}) — беру данные страницы` +
+              (ctl.getPhase() === "off" ? ", тип отключён" : "")
+          );
+        }
+        // На сверке источником истины всегда остаётся страница.
+        bumpChannelCounter(channel);
+        return { snapshot: snapshotFromDomData(domData), path: "dom", data: domData };
+      }
+
+      ctl.batchOk();
+      bumpChannelCounter(channel);
+      return { snapshot: apiData, path: "api", data: apiData, articleType: attempt.articleType };
     }
 
     return {
       read,
-      getPhase: () => controller.getPhase(),
-      snapshot: () => ({ phase: controller.getPhase(), reason: controller.getReason(), hasConfig: haveApiConfig() }),
-      _controller: controller,
+      getPhase: (channel) => channelFor(channel || "posting").getPhase(),
+      snapshot: () => {
+        const out = {};
+        for (const [name, ctl] of channels.entries()) out[name] = ctl.snapshot();
+        return out;
+      },
     };
   }
 

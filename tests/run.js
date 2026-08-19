@@ -1,5 +1,5 @@
 // Простой раннер тестов без зависимостей: node tests/run.js
-const suites = ["./test-api-mapping.js", "./test-api-reader.js"];
+const suites = ["./test-api-mapping.js", "./test-api-returns.js", "./test-api-reader.js"];
 
 (async () => {
   let passed = 0;

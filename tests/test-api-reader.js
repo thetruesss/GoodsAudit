@@ -1,90 +1,146 @@
-// Тесты оркестратора чтения (api-reader.js) с полностью фейковым драйвером.
+// Тесты оркестратора чтения (api-reader.js) с полностью фейковым драйвером:
+// разрешение типа, паритет с DOM по каждому типу, фолбэки, 401, отключение.
 const assert = require("assert");
 const M = require("../api-mapping.js");
+const RT = require("../api-returns.js");
 const R = require("../api-reader.js");
 
-const RESP = (id, snap) => ({
-  records: [
-    {
-      articleId: id,
-      shipment: snap.shipment,
-      price: snap.price,
-      item: { name: snap.nomenclature },
-      place: { warehouse: { name: snap.operationalWarehouse } },
-      delivery: { scheme: snap.deliveryScheme },
-      formation: { warehouse: snap.formationWarehouse },
-      owner: { title: snap.owner },
-      statuses: { lozon: snap.statusLozon, alps: snap.statusAlps, active: snap.status },
-    },
-  ],
-});
+// --- фикстуры «бэкенда» ------------------------------------------------------
 
-function makeSnap(id, n) {
+function postingInfo(id, over = {}) {
+  return Object.assign(
+    {
+      lozonId: Number(id),
+      number: "0136207144-0017-1",
+      price: { value: 9877, currency: "RUB" },
+      deliverySchema: "fbs",
+      lozonState: "lost",
+      formationWarehouseName: "FBS/2156699/Чагинская",
+      currentWarehouseName: "МО_ИСТРА_ДО",
+      contractCustomerName: "ИП Иванов",
+      alpsStatus: null,
+    },
+    over
+  );
+}
+
+const postingContent = { exemplars: [{ modelName: "Чехлы Автопилот HONDA CR-V" }] };
+
+// Нормализация — копия normalizeArticleSnapshot из background.js (тот же контракт).
+function normalize(raw, item) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const articleId = item?.articleId;
+  const fallbackShipment = item?.shipmentSource || "";
+  if (src.unsupportedTransitBox) {
+    return {
+      unsupportedTransitBox: true,
+      price: 0,
+      nomenclature: "",
+      shipment: String(fallbackShipment || articleId || "").trim(),
+      articleId: String(src.articleId || "").trim(),
+      operationalWarehouse: "",
+      operationalWarehouseSeen: false,
+      deliveryScheme: "",
+      formationWarehouse: "",
+      owner: "",
+      status: "",
+      statusLozon: "",
+      statusAlps: "",
+    };
+  }
+  const priceNum = Number(src.price);
+  const hasPriceValue = src.price != null && src.price !== "" && Number.isFinite(priceNum);
+  const isTransit = Boolean(src.isTransitBox);
+  const isC2C = Boolean(src.isC2C);
   return {
-    price: 1000 + n,
-    nomenclature: "Товар " + n,
-    shipment: "0179-000" + n + "-1",
-    articleId: id,
-    operationalWarehouse: "СКЛАД_" + n,
-    deliveryScheme: "FBO",
-    formationWarehouse: "СЦ " + n,
-    owner: "ООО " + n,
-    status: "Активен",
-    statusLozon: "На складе",
-    statusAlps: "Готов",
+    price: hasPriceValue ? priceNum : 0,
+    nomenclature: String(
+      src.nomenclature || (isTransit ? "Транзитная коробка" : isC2C ? "C2C" : "")
+    ),
+    shipment: String(src.shipment || fallbackShipment || articleId || "").trim(),
+    articleId: String(src.articleId || "").trim(),
+    operationalWarehouse: String(src.operationalWarehouse || ""),
+    operationalWarehouseSeen: Boolean(src.operationalWarehouseSeen),
+    deliveryScheme: String(src.deliveryScheme || (isC2C ? "C2C" : "")),
+    formationWarehouse: String(src.formationWarehouse || ""),
+    owner: String(src.owner || ""),
+    status: String(src.status || ""),
+    statusLozon: String(src.statusLozon || ""),
+    statusAlps: String(src.statusAlps || ""),
+    unsupportedTransitBox: false,
   };
 }
 
-function domDataFromSnap(snap) {
-  return Object.assign({}, snap, { operationalWarehouseSeen: true, unsupportedTransitBox: false });
-}
-
-// Фейковый драйвер: считает вызовы, эмулирует захват заголовков и API-ответы.
+// Фейковый драйвер: «бэкенд» по URL + DOM, который по умолчанию согласован с API.
 function makeDriver(opts = {}) {
   const state = {
     domCalls: 0,
     replayCalls: 0,
-    captureCalls: 0,
     relearnCalls: 0,
-    snaps: opts.snaps || {},
-    apiStatus: opts.apiStatus || (() => 200),
+    urls: [],
     logs: [],
-    onDomain: opts.onDomain !== false,
+    types: opts.types || {}, // articleId → articleType
+    infos: opts.infos || {}, // articleId → info payload
+    contents: opts.contents || {},
+    status: opts.status || (() => 200),
+    domOverride: opts.domOverride || null,
+    opsWarehouses: opts.opsWarehouses || [],
   };
+
+  const apiSnapshotFor = (id) => {
+    const type = state.types[id] || "posting";
+    if (!RT.isSupportedType(type)) return RT.mapUnsupported(id);
+    const mapped = RT.mapByType(type, state.infos[id], state.contents[id]);
+    if (mapped) return mapped;
+    // Для объектов без фикстуры «страница» отдаёт пустую карточку.
+    const empty = RT.emptySnapshot();
+    empty.articleId = String(id);
+    return empty;
+  };
+
   const deps = {
     domScrape: async (item) => {
       state.domCalls += 1;
-      return domDataFromSnap(state.snaps[item.articleId]);
+      const id = String(item.articleId);
+      const raw = apiSnapshotFor(id);
+      const ops = M.resolveOpsWarehouse(raw.operationalWarehouse, state.opsWarehouses);
+      const withOps = Object.assign({}, raw, {
+        operationalWarehouse: ops.matched,
+        operationalWarehouseSeen: ops.seen,
+      });
+      const normalized = normalize(withOps, item);
+      return state.domOverride ? state.domOverride(normalized, item) : normalized;
     },
-    captureAndClear: async () => {
-      state.captureCalls += 1;
-      // Отдаём одну запись с валидным авторизационным заголовком и «живым» ответом,
-      // чтобы обучение нашло ручку.
-      const id = opts.learnId;
-      if (!id) return [];
-      return [
-        {
-          url: `https://returns.o3t.ru/p-api/articles/${id}/data`,
-          method: "POST",
-          status: 200,
-          headers: { authorization: "Bearer T1", "x-o3-app-name": "scms" },
-          body: JSON.stringify({ id }),
-          responseText: JSON.stringify(RESP(id, state.snaps[id])),
-        },
-      ];
-    },
-    replay: async (req, headers) => {
+    captureAndClear: async () => [
+      {
+        url: "https://returns.o3t.ru/p-api/alps-api/v1/ArticleProfile/Posting/info?id=1",
+        method: "GET",
+        status: 200,
+        headers: { authorization: "Bearer T1", "x-o3-app-name": "alps-client" },
+        responseText: "{}",
+      },
+    ],
+    replay: async (req) => {
       state.replayCalls += 1;
-      const id = (req.url.match(/articles\/(\d+)\//) || [])[1];
-      const status = state.apiStatus(id, state.replayCalls);
-      if (status !== 200) return { status, body: null };
-      return { status: 200, body: RESP(id, state.snaps[id]) };
+      state.urls.push(req.url);
+      const st = state.status(req.url, state.replayCalls);
+      if (st !== 200) return { status: st, body: null };
+      const typeMatch = req.url.match(/get-article-type\?article=(.+)$/);
+      if (typeMatch) {
+        const id = decodeURIComponent(typeMatch[1]);
+        return { status: 200, body: { articleId: Number(id) || id, articleType: state.types[id] || "posting" } };
+      }
+      const infoMatch = req.url.match(/\/(Posting|Exemplar|TransitBox)\/info\?id=(\d+)/);
+      if (infoMatch) return { status: 200, body: state.infos[infoMatch[2]] };
+      const contentMatch = req.url.match(/(posting-content|TransitBox\/content)\/(\d+)/);
+      if (contentMatch) return { status: 200, body: state.contents[contentMatch[2]] || { exemplars: [] } };
+      return { status: 404, body: null };
     },
+    normalize,
     relearnToken: async () => {
       state.relearnCalls += 1;
-      state.onDomain = true;
     },
-    isOnHubDomain: async () => state.onDomain,
+    isOnHubDomain: async () => true,
     log: (m) => state.logs.push(m),
   };
   return { state, deps };
@@ -93,196 +149,301 @@ function makeDriver(opts = {}) {
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
-test("probe(2) → on, дальше только API", async () => {
-  const ids = ["100000000001", "100000000002", "100000000003", "100000000004"];
-  const snaps = {};
-  ids.forEach((id, i) => (snaps[id] = makeSnap(id, i + 1)));
-  const { state, deps } = makeDriver({ snaps, learnId: ids[0] });
-  // Захват должен вернуть ручку текущего объекта на каждом probe-шаге:
-  deps.captureAndClear = (function () {
-    let call = 0;
-    return async () => {
-      const id = ids[call++];
-      return [
-        {
-          url: `https://returns.o3t.ru/p-api/articles/${id}/data`,
-          method: "POST",
-          status: 200,
-          headers: { authorization: "Bearer T1", "x-o3-app-name": "scms" },
-          body: JSON.stringify({ id }),
-          responseText: JSON.stringify(RESP(id, snaps[id])),
-        },
-      ];
-    };
-  })();
-
+test("posting: 2 сверки с DOM → тип включается, дальше только API", async () => {
+  const ids = ["501883634205001", "501883634205002", "501883634205003"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  const { state, deps } = makeDriver({ infos, contents });
   const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+
   const r1 = await reader.read({ articleId: ids[0] });
-  assert.strictEqual(r1.path, "dom");
+  assert.strictEqual(r1.path, "dom", "первая сверка — данные со страницы");
   const r2 = await reader.read({ articleId: ids[1] });
-  assert.strictEqual(r2.path, "dom");
-  assert.strictEqual(reader.getPhase(), "on", "включились после 2 проб");
+  assert.strictEqual(r2.path, "dom", "вторая сверка — данные со страницы");
+  assert.strictEqual(reader.getPhase("posting"), "on", "тип подтверждён");
+
+  const domCallsBefore = state.domCalls;
   const r3 = await reader.read({ articleId: ids[2] });
-  assert.strictEqual(r3.path, "api");
-  assert.strictEqual(r3.data.operationalWarehouseSeen, true);
-  for (const f of M.SCRAPE_FIELDS) {
-    assert.deepStrictEqual(r3.data[f], snaps[ids[2]][f], "field parity: " + f);
-  }
+  assert.strictEqual(r3.path, "api", "дальше читаем через API");
+  assert.strictEqual(state.domCalls, domCallsBefore, "страница больше не открывается");
+  assert.strictEqual(r3.data.price, 9877);
+  assert.strictEqual(r3.data.statusLozon, "Недостача");
+  assert.strictEqual(r3.data.deliveryScheme, "FBS");
 });
 
-test("паритет: API-снапшот побайтно равен DOM-снапшоту", async () => {
-  const ids = ["200000000001", "200000000002", "200000000003"];
-  const snaps = {};
-  ids.forEach((id, i) => (snaps[id] = makeSnap(id, i + 10)));
-  let call = 0;
-  const { state, deps } = makeDriver({ snaps });
-  deps.captureAndClear = async () => {
-    const id = ids[Math.min(call++, ids.length - 1)];
-    return [
-      {
-        url: `https://returns.o3t.ru/p-api/articles/${id}/data`,
-        method: "POST",
-        status: 200,
-        headers: { authorization: "Bearer T1" },
-        body: JSON.stringify({ id }),
-        responseText: JSON.stringify(RESP(id, snaps[id])),
-      },
-    ];
-  };
+test("паритет: API-данные совпадают с DOM поле в поле", async () => {
+  const id = "501883634205010";
+  const infos = { [id]: postingInfo(id) };
+  const contents = { [id]: postingContent };
+  const { deps } = makeDriver({ infos, contents });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+  await reader.read({ articleId: id });
+  await reader.read({ articleId: id });
+  const api = await reader.read({ articleId: id });
+  assert.strictEqual(api.path, "api");
+  const dom = await deps.domScrape({ articleId: id });
+  for (const f of M.SCRAPE_FIELDS) {
+    assert.deepStrictEqual(api.data[f], dom[f], "поле " + f);
+  }
+  assert.strictEqual(api.data.unsupportedTransitBox, dom.unsupportedTransitBox);
+});
+
+test("неподдерживаемый тип: закрывается без открытия страницы", async () => {
+  const ids = ["900000000001", "900000000002", "900000000003"];
+  const types = {};
+  ids.forEach((id) => (types[id] = "pallet"));
+  const { state, deps } = makeDriver({ types });
   const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
   await reader.read({ articleId: ids[0] });
   await reader.read({ articleId: ids[1] });
-  const apiRes = await reader.read({ articleId: ids[2] });
-  const domRes = domDataFromSnap(snaps[ids[2]]);
-  for (const f of M.SCRAPE_FIELDS) {
-    assert.deepStrictEqual(apiRes.data[f], domRes[f], "field parity: " + f);
-  }
-});
-
-test("паритет фильтра складов: чужой склад → matched='' и seen=true (в on)", async () => {
-  // Наш склад — только СКЛАД_1. Объекты: свой, чужой, снова свой.
-  const ids = ["700000000001", "700000000002", "700000000003"];
-  const snaps = {
-    "700000000001": Object.assign(makeSnap(ids[0], 1), { operationalWarehouse: "СКЛАД_1" }),
-    "700000000002": Object.assign(makeSnap(ids[1], 1), { operationalWarehouse: "ЧУЖОЙ_СКЛАД" }),
-    "700000000003": Object.assign(makeSnap(ids[2], 1), { operationalWarehouse: "СКЛАД_1" }),
-  };
-  let call = 0;
-  const { deps } = makeDriver({ snaps });
-  deps.captureAndClear = async () => {
-    const id = ids[Math.min(call++, ids.length - 1)];
-    return [
-      {
-        url: `https://returns.o3t.ru/p-api/articles/${id}/data`,
-        method: "POST",
-        status: 200,
-        headers: { authorization: "Bearer T1" },
-        body: JSON.stringify({ id }),
-        responseText: JSON.stringify(RESP(id, snaps[id])),
-      },
-    ];
-  };
-  // Обучаемся на двух своих складах (probe объекты — свой склад), затем on.
-  const probeIds = [ids[0], ids[2]];
-  const reader = R.createHubApiReader(deps, {
-    verifyEveryN: 0,
-    requireOpsField: true,
-    opsWarehouses: ["СКЛАД_1"],
-  });
-  await reader.read({ articleId: probeIds[0] });
-  await reader.read({ articleId: probeIds[1] });
-  assert.strictEqual(reader.getPhase(), "on");
-  // Теперь читаем «чужой» объект через API — склад не наш.
-  const r = await reader.read({ articleId: ids[1] });
+  assert.strictEqual(reader.getPhase("unsupported:pallet"), "on");
+  const before = state.domCalls;
+  const r = await reader.read({ articleId: ids[2] });
   assert.strictEqual(r.path, "api");
-  assert.strictEqual(r.data.operationalWarehouse, "", "чужой склад → пусто (как в DOM)");
-  assert.strictEqual(r.data.operationalWarehouseSeen, true, "склад присутствовал → seen=true");
+  assert.strictEqual(state.domCalls, before, "страница не открывалась");
+  assert.strictEqual(r.data.unsupportedTransitBox, true);
 });
 
-test("401 в on → переучивание, затем снова API", async () => {
-  const ids = ["300000000001", "300000000002", "300000000003"];
-  const snaps = {};
-  ids.forEach((id, i) => (snaps[id] = makeSnap(id, i + 20)));
-  let call = 0;
-  let firstApiFor3 = true;
+test("каждый неподдерживаемый тип подтверждается отдельно", async () => {
+  const palletIds = ["900000001001", "900000001002", "900000001003"];
+  const sackId = "900000002001";
+  const types = { [sackId]: "sack" };
+  palletIds.forEach((id) => (types[id] = "pallet"));
+  const { state, deps } = makeDriver({ types });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+  await reader.read({ articleId: palletIds[0] });
+  await reader.read({ articleId: palletIds[1] });
+  assert.strictEqual(reader.getPhase("unsupported:pallet"), "on");
+  // Другой неподдерживаемый тип ещё не проверялся — его нельзя закрывать молча.
+  assert.strictEqual(reader.getPhase("unsupported:sack"), "probe");
+  const before = state.domCalls;
+  const r = await reader.read({ articleId: sackId });
+  assert.strictEqual(r.path, "dom", "новый тип сначала сверяется со страницей");
+  assert.strictEqual(state.domCalls, before + 1);
+});
+
+test("сломанная ручка деталей отключает тип, а не крутится вечно", async () => {
+  const ids = ["501883634205070", "501883634205071", "501883634205072"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
   const { state, deps } = makeDriver({
-    snaps,
-    apiStatus: (id) => {
-      if (id === ids[2] && firstApiFor3) {
-        firstApiFor3 = false;
+    infos,
+    contents,
+    status: (url) => (url.includes("/Posting/info") ? 500 : 200),
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
+  await reader.read({ articleId: ids[0] });
+  await reader.read({ articleId: ids[1] });
+  assert.strictEqual(reader.getPhase("posting"), "off", "тип отключён после сбоев");
+  const before = state.replayCalls;
+  const r = await reader.read({ articleId: ids[2] });
+  assert.strictEqual(r.path, "dom");
+  assert.ok(state.replayCalls - before <= 1, "к сломанной ручке больше не ходим");
+});
+
+test("расхождение с DOM на probe → тип уходит в off и читается страницей", async () => {
+  const ids = ["501883634205020", "501883634205021", "501883634205022"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  // DOM «показывает» другую цену → паритета нет.
+  const { state, deps } = makeDriver({
+    infos,
+    contents,
+    domOverride: (snap) => Object.assign({}, snap, { price: snap.price + 100 }),
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
+  const r1 = await reader.read({ articleId: ids[0] });
+  assert.strictEqual(r1.path, "dom");
+  await reader.read({ articleId: ids[1] });
+  assert.strictEqual(reader.getPhase("posting"), "off", "тип отключён после 2 расхождений");
+  const replaysBefore = state.replayCalls;
+  const r3 = await reader.read({ articleId: ids[2] });
+  assert.strictEqual(r3.path, "dom");
+  // Отключённый тип не тратит запросы на детали (только разрешение типа).
+  assert.ok(state.replayCalls - replaysBefore <= 1, "лишних запросов нет");
+});
+
+test("разные типы независимы: сломанный exemplar не выключает posting", async () => {
+  const pIds = ["501883634205030", "501883634205031", "501883634205032"];
+  const eIds = ["701883311344001", "701883311344002"];
+  const types = {};
+  const infos = {};
+  const contents = {};
+  pIds.forEach((id) => {
+    types[id] = "posting";
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  eIds.forEach((id) => {
+    types[id] = "exemplar";
+    infos[id] = {
+      exemplarId: Number(id),
+      modelName: "Экземпляр",
+      deliverySchema: "fbo",
+      lozonExemplarState: "taken",
+      currentWarehouseName: "МО_ИСТРА_ХАБ",
+    };
+  });
+  const { deps } = makeDriver({
+    types,
+    infos,
+    contents,
+    // У экземпляров DOM «находит» номер отправления, которого нет в API.
+    domOverride: (snap, item) =>
+      String(item.articleId).startsWith("7018")
+        ? Object.assign({}, snap, { shipment: "0179-1111111-1" })
+        : snap,
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+  await reader.read({ articleId: eIds[0] });
+  await reader.read({ articleId: eIds[1] });
+  assert.strictEqual(reader.getPhase("exemplar"), "off", "экземпляры ушли в фолбэк");
+
+  await reader.read({ articleId: pIds[0] });
+  await reader.read({ articleId: pIds[1] });
+  assert.strictEqual(reader.getPhase("posting"), "on", "отправления работают через API");
+  const r = await reader.read({ articleId: pIds[2] });
+  assert.strictEqual(r.path, "api");
+});
+
+test("401 в режиме on → переучивание и возврат к API", async () => {
+  const ids = ["501883634205040", "501883634205041", "501883634205042"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  let fired = false;
+  const { state, deps } = makeDriver({
+    infos,
+    contents,
+    status: (url) => {
+      if (!fired && url.includes("Posting/info?id=" + ids[2])) {
+        fired = true;
         return 401;
       }
       return 200;
     },
   });
-  deps.captureAndClear = async () => {
-    const id = ids[Math.min(call++, ids.length - 1)];
-    return [
-      {
-        url: `https://returns.o3t.ru/p-api/articles/${id}/data`,
-        method: "POST",
-        status: 200,
-        headers: { authorization: "Bearer T1" },
-        body: JSON.stringify({ id }),
-        responseText: JSON.stringify(RESP(id, snaps[id])),
-      },
-    ];
-  };
   const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
   await reader.read({ articleId: ids[0] });
   await reader.read({ articleId: ids[1] });
-  const r3 = await reader.read({ articleId: ids[2] });
-  assert.strictEqual(state.relearnCalls >= 1, true, "было переучивание");
-  assert.strictEqual(r3.path, "api", "после переучивания снова API");
-  assert.strictEqual(reader.getPhase(), "on");
+  const r = await reader.read({ articleId: ids[2] });
+  assert.strictEqual(state.relearnCalls >= 1, true, "было переучивание сессии");
+  assert.strictEqual(r.path, "api", "после переучивания снова API");
 });
 
-test("две неуспешные пробы → off, дальше всегда DOM", async () => {
-  const { state, deps } = makeDriver({
-    snaps: { a: makeSnap("a", 1) },
+test("не удалось определить тип → полностью уходим на страницы", async () => {
+  const { state, deps } = makeDriver({ status: () => 500 });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
+  const r1 = await reader.read({ articleId: "1000000000001" });
+  assert.strictEqual(r1.path, "dom");
+  await reader.read({ articleId: "1000000000002" });
+  const before = state.replayCalls;
+  const r3 = await reader.read({ articleId: "1000000000003" });
+  assert.strictEqual(r3.path, "dom");
+  assert.strictEqual(state.replayCalls, before, "запросы к API прекращены");
+});
+
+test("фильтр опер. складов: чужой склад пустеет, seen остаётся true", async () => {
+  const ids = ["501883634205050", "501883634205051", "501883634205052"];
+  const infos = {
+    [ids[0]]: postingInfo(ids[0], { currentWarehouseName: "МО_ИСТРА_ДО" }),
+    [ids[1]]: postingInfo(ids[1], { currentWarehouseName: "МО_ИСТРА_ДО" }),
+    [ids[2]]: postingInfo(ids[2], { currentWarehouseName: "ЧУЖОЙ_СКЛАД" }),
+  };
+  const contents = {};
+  ids.forEach((id) => (contents[id] = postingContent));
+  const { deps } = makeDriver({ infos, contents, opsWarehouses: ["МО_ИСТРА_ДО"] });
+  const reader = R.createHubApiReader(deps, {
+    verifyEveryN: 0,
+    opsWarehouses: ["МО_ИСТРА_ДО"],
   });
-  // Захват не содержит подходящей ручки → обучение не происходит.
-  deps.captureAndClear = async () => [];
-  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
-  await reader.read({ articleId: "500000000001" });
-  await reader.read({ articleId: "500000000002" });
-  assert.strictEqual(reader.getPhase(), "off");
-  const r = await reader.read({ articleId: "500000000003" });
-  assert.strictEqual(r.path, "dom");
-});
-
-test("сверка находит расхождение → берём DOM и уходим в off", async () => {
-  const ids = ["600000000001", "600000000002", "600000000003"];
-  const snaps = {};
-  ids.forEach((id, i) => (snaps[id] = makeSnap(id, i + 30)));
-  let call = 0;
-  const { state, deps } = makeDriver({ snaps });
-  deps.captureAndClear = async () => {
-    const id = ids[Math.min(call++, ids.length - 1)];
-    return [
-      {
-        url: `https://returns.o3t.ru/p-api/articles/${id}/data`,
-        method: "POST",
-        status: 200,
-        headers: { authorization: "Bearer T1" },
-        body: JSON.stringify({ id }),
-        responseText: JSON.stringify(RESP(id, snaps[id])),
-      },
-    ];
-  };
-  // На сверке DOM вернёт другую цену, чем API → расхождение.
-  const origDom = deps.domScrape;
-  deps.domScrape = async (item) => {
-    const d = await origDom(item);
-    if (item.articleId === ids[2]) return Object.assign({}, d, { price: d.price + 999 });
-    return d;
-  };
-  const reader = R.createHubApiReader(deps, { verifyEveryN: 1, maxMiscompares: 1 });
   await reader.read({ articleId: ids[0] });
   await reader.read({ articleId: ids[1] });
-  const r3 = await reader.read({ articleId: ids[2] });
-  assert.strictEqual(r3.path, "dom", "при расхождении отдаём DOM");
-  assert.strictEqual(reader.getPhase(), "off");
+  const r = await reader.read({ articleId: ids[2] });
+  assert.strictEqual(r.path, "api");
+  assert.strictEqual(r.data.operationalWarehouse, "", "чужой склад → пусто, как в DOM");
+  assert.strictEqual(r.data.operationalWarehouseSeen, true, "склад на карточке был");
+});
+
+test("периодическая сверка: каждый N-й объект перепроверяется страницей", async () => {
+  const ids = [];
+  const infos = {};
+  const contents = {};
+  for (let i = 1; i <= 8; i++) {
+    const id = "50188363420520" + i;
+    ids.push(id);
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  }
+  const { state, deps } = makeDriver({ infos, contents });
+  // Сверяем каждый третий объект канала.
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 3 });
+  const paths = [];
+  for (const id of ids) {
+    const r = await reader.read({ articleId: id });
+    paths.push(r.path);
+  }
+  assert.deepStrictEqual(paths.slice(0, 2), ["dom", "dom"], "две стартовые пробы");
+  assert.strictEqual(reader.getPhase("posting"), "on");
+  assert.ok(paths.slice(2).includes("api"), "основная масса читается через API");
+  const verifyReads = paths.slice(2).filter((p) => p === "dom").length;
+  assert.ok(verifyReads >= 1, "контрольные сверки со страницей происходят");
+  assert.ok(verifyReads < paths.length - 2, "но это не каждый объект");
+});
+
+test("постоянный 401 на пробах не крутит переучивание бесконечно", async () => {
+  const ids = ["501883634205300", "501883634205301", "501883634205302"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  const { state, deps } = makeDriver({ infos, contents, status: () => 401 });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
+  for (const id of ids) {
+    const r = await reader.read({ articleId: id });
+    assert.strictEqual(r.path, "dom");
+  }
+  await reader.read({ articleId: ids[0] });
+  assert.strictEqual(reader.getPhase("resolve"), "off", "разрешение типа отключено");
+  assert.ok(state.relearnCalls <= 3, "переучивание не повторяется на каждый объект");
+});
+
+test("неизвестный код статуса → объект читается страницей, тип не ломается", async () => {
+  const ids = ["501883634205060", "501883634205061", "501883634205062"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  infos[ids[2]] = postingInfo(ids[2], { lozonState: "brandNewStateFromBackend" });
+  const { state, deps } = makeDriver({ infos, contents });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+  await reader.read({ articleId: ids[0] });
+  await reader.read({ articleId: ids[1] });
+  assert.strictEqual(reader.getPhase("posting"), "on");
+  const before = state.domCalls;
+  const r = await reader.read({ articleId: ids[2] });
+  assert.strictEqual(r.path, "dom", "неизвестный код → страница");
+  assert.strictEqual(state.domCalls, before + 1);
+  assert.strictEqual(reader.getPhase("posting"), "on", "тип остаётся включённым");
 });
 
 module.exports = { tests };

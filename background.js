@@ -1,4 +1,10 @@
-importScripts("source-parse.js", "source-cache.js", "api-mapping.js", "api-reader.js");
+importScripts(
+  "source-parse.js",
+  "source-cache.js",
+  "api-mapping.js",
+  "api-returns.js",
+  "api-reader.js"
+);
 
 const JOB_STORAGE_LIST_CAP = 400;
 const RESULTS_CACHE_MAX_ENTRIES = 25000;
@@ -933,13 +939,24 @@ async function scrapeArticleOnTab(
   if (!raw || typeof raw !== "object") {
     throw new Error(`Пустой ответ со страницы (${articleId})`);
   }
-  if (raw.unsupportedTransitBox) {
+  if (!raw.unsupportedTransitBox && !snapshotHasAnyData(raw)) {
+    throw new Error(`Нет данных на странице после перезагрузки (${articleId})`);
+  }
+  return normalizeArticleSnapshot(raw, articleId, fallbackShipment);
+}
+
+// Единая нормализация сырого снапшота (и со страницы, и из API) в тот вид,
+// который потребляет остальной код. Общая для обоих путей намеренно: так
+// исключается расхождение из-за разной постобработки.
+function normalizeArticleSnapshot(raw, articleId, fallbackShipment = "") {
+  const src = raw && typeof raw === "object" ? raw : {};
+  if (src.unsupportedTransitBox) {
     return {
       unsupportedTransitBox: true,
       price: 0,
       nomenclature: "",
       shipment: String(fallbackShipment || articleId || "").trim(),
-      articleId: String(raw.articleId || "").trim(),
+      articleId: String(src.articleId || "").trim(),
       operationalWarehouse: "",
       operationalWarehouseSeen: false,
       deliveryScheme: "",
@@ -950,30 +967,26 @@ async function scrapeArticleOnTab(
       statusAlps: "",
     };
   }
-  if (!snapshotHasAnyData(raw)) {
-    throw new Error(`Нет данных на странице после перезагрузки (${articleId})`);
-  }
-
-  const { price, nomenclature, shipment } = raw;
-  const isTransit = Boolean(raw.isTransitBox);
-  const isC2C = Boolean(raw.isC2C);
-  const scrapedArticleId = String(raw.articleId || "").trim();
-  const effectiveShipment = String(shipment || fallbackShipment || articleId || "").trim();
+  const priceNum = Number(src.price);
+  const hasPriceValue =
+    src.price != null && src.price !== "" && Number.isFinite(priceNum);
+  const isTransit = Boolean(src.isTransitBox);
+  const isC2C = Boolean(src.isC2C);
   return {
-    price: hasPrice(raw) ? Number(price) : 0,
+    price: hasPriceValue ? priceNum : 0,
     nomenclature: String(
-      nomenclature || (isTransit ? "Транзитная коробка" : isC2C ? "C2C" : "")
+      src.nomenclature || (isTransit ? "Транзитная коробка" : isC2C ? "C2C" : "")
     ),
-    shipment: effectiveShipment,
-    articleId: scrapedArticleId,
-    operationalWarehouse: String(raw.operationalWarehouse || ""),
-    operationalWarehouseSeen: Boolean(raw.operationalWarehouseSeen),
-    deliveryScheme: String(raw.deliveryScheme || (isC2C ? "C2C" : "")),
-    formationWarehouse: String(raw.formationWarehouse || ""),
-    owner: String(raw.owner || ""),
-    status: String(raw.status || ""),
-    statusLozon: String(raw.statusLozon || ""),
-    statusAlps: String(raw.statusAlps || ""),
+    shipment: String(src.shipment || fallbackShipment || articleId || "").trim(),
+    articleId: String(src.articleId || "").trim(),
+    operationalWarehouse: String(src.operationalWarehouse || ""),
+    operationalWarehouseSeen: Boolean(src.operationalWarehouseSeen),
+    deliveryScheme: String(src.deliveryScheme || (isC2C ? "C2C" : "")),
+    formationWarehouse: String(src.formationWarehouse || ""),
+    owner: String(src.owner || ""),
+    status: String(src.status || ""),
+    statusLozon: String(src.statusLozon || ""),
+    statusAlps: String(src.statusAlps || ""),
     unsupportedTransitBox: false,
   };
 }
@@ -2108,6 +2121,8 @@ async function runJobFromState(startPayload) {
           if (requestPacer) await requestPacer.take(1);
           return replayApiOnTab(workerTabId, req, headers);
         },
+        normalize: (rawSnapshot, it) =>
+          normalizeArticleSnapshot(rawSnapshot, it?.articleId, it?.shipmentSource || ""),
         relearnToken: relearnTokenForWorker,
         isOnHubDomain: () => isTabOnArticleOrigin(workerTabId),
         log: (m) => {
@@ -2118,7 +2133,6 @@ async function runJobFromState(startPayload) {
       const reader =
         apiPrefs.enabled && globalThis.__gaApiReader
           ? globalThis.__gaApiReader.createHubApiReader(readerDeps, {
-              requireOpsField: opsListForJob.length > 0,
               opsWarehouses: Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob,
               verifyEveryN: 25,
             })
@@ -2195,7 +2209,13 @@ async function runJobFromState(startPayload) {
           let data;
           let readPath = "dom";
           if (reader) {
-            const rr = await reader.read(item);
+            // Общий таймаут на весь путь чтения: зависший fetch внутри страницы
+            // не должен вешать поток — сработает та же логика перезапуска вкладки.
+            const rr = await withTimeout(
+              reader.read(item),
+              ITEM_HARD_TIMEOUT_MS,
+              `Таймаут обработки в потоке (${Math.round(ITEM_HARD_TIMEOUT_MS / 1000)}с)`
+            );
             data = rr.data;
             readPath = rr.path;
           } else {

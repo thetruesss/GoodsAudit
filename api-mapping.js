@@ -1,18 +1,13 @@
-// Чистая логика перевода чтения карточек со скрейпинга DOM на API:
-// разбор перехваченного трафика страницы, обучение шаблона запроса и маппинга
-// полей по DOM-эталону, экстракция, лимитер нагрузки и машина состояний.
-// Никакого ввода-вывода и chrome.* — модуль работает и в service worker
-// (importScripts), и в Node (require) для тестов.
+// Общие (не привязанные к конкретному API) кирпичики быстрого чтения:
+// разбор перехваченных заголовков авторизации, сравнение снапшотов на паритет
+// с DOM, паритет фильтра опер. складов, ограничитель нагрузки и машина
+// состояний probe → on → off. Без ввода-вывода и chrome.* — работает и в
+// service worker (importScripts), и в Node (require) для тестов.
 (function (root, factory) {
   const api = factory();
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.__gaApiMapping = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  const ID_MARKER_RAW = "\u0000GA_ID\u0000";
-  const ID_MARKER_ENC = "\u0000GA_ID_ENC\u0000";
-  const MAX_JSON_NODES = 30000;
-  const MAX_JSON_DEPTH = 14;
-
   // Поля «сырого снапшота» — ровно те, что возвращает DOM-скрейпер страницы.
   const SCRAPE_FIELDS = [
     "price",
@@ -27,8 +22,6 @@
     "statusLozon",
     "statusAlps",
   ];
-  // Без этих полей API-путь не имеет смысла — не включаемся.
-  const CORE_FIELDS = ["price", "nomenclature", "shipment", "articleId"];
 
   const AUTH_HEADER_NAMES = ["authorization"];
   const AUTH_HEADER_PREFIXES = ["x-o3-", "x-csrf", "x-xsrf", "x-auth"];
@@ -59,130 +52,6 @@
     return false;
   }
 
-  function collectJsonPaths(rootValue) {
-    const out = [];
-    const stack = [{ value: rootValue, path: [] }];
-    let nodes = 0;
-    while (stack.length) {
-      const { value, path } = stack.pop();
-      nodes += 1;
-      if (nodes > MAX_JSON_NODES || path.length > MAX_JSON_DEPTH) continue;
-      if (value == null) continue;
-      const t = typeof value;
-      if (t === "string" || t === "number" || t === "boolean") {
-        out.push({ path, value });
-        continue;
-      }
-      if (Array.isArray(value)) {
-        for (let i = 0; i < value.length; i++) {
-          stack.push({ value: value[i], path: path.concat(i) });
-        }
-        continue;
-      }
-      if (t === "object") {
-        for (const key of Object.keys(value)) {
-          stack.push({ value: value[key], path: path.concat(key) });
-        }
-      }
-    }
-    return out;
-  }
-
-  function getByPath(rootValue, path) {
-    let cur = rootValue;
-    for (const seg of Array.isArray(path) ? path : []) {
-      if (cur == null || typeof cur !== "object") return undefined;
-      cur = cur[seg];
-    }
-    return cur;
-  }
-
-  function isBoundaryChar(ch) {
-    return !/[0-9A-Za-z_-]/.test(ch || "");
-  }
-
-  // Заменяет вхождения ID (по границам слова) на маркер. Возвращает
-  // { text, count } — count = сколько замен сделано.
-  function replaceIdOccurrences(text, id, marker) {
-    const s = String(text ?? "");
-    const needle = String(id ?? "");
-    if (!s || !needle) return { text: s, count: 0 };
-    let out = "";
-    let i = 0;
-    let count = 0;
-    while (i < s.length) {
-      const idx = s.indexOf(needle, i);
-      if (idx < 0) {
-        out += s.slice(i);
-        break;
-      }
-      const before = idx === 0 ? "" : s[idx - 1];
-      const afterIdx = idx + needle.length;
-      const after = afterIdx >= s.length ? "" : s[afterIdx];
-      if (isBoundaryChar(before) && isBoundaryChar(after)) {
-        out += s.slice(i, idx) + marker;
-        count += 1;
-        i = afterIdx;
-      } else {
-        out += s.slice(i, afterIdx);
-        i = afterIdx;
-      }
-    }
-    return { text: out, count };
-  }
-
-  function buildRequestTemplate(entry, articleId) {
-    const id = String(articleId ?? "").trim();
-    if (!entry || !id) return null;
-    const method = String(entry.method || "GET").toUpperCase();
-    const encId = encodeURIComponent(id);
-
-    let url = String(entry.url || "");
-    let urlCount = 0;
-    if (encId !== id) {
-      const encPass = replaceIdOccurrences(url, encId, ID_MARKER_ENC);
-      url = encPass.text;
-      urlCount += encPass.count;
-    }
-    const rawPass = replaceIdOccurrences(url, id, ID_MARKER_RAW);
-    url = rawPass.text;
-    urlCount += rawPass.count;
-
-    let body = entry.body == null ? null : String(entry.body);
-    let bodyCount = 0;
-    if (body != null) {
-      if (encId !== id) {
-        const encPass = replaceIdOccurrences(body, encId, ID_MARKER_ENC);
-        body = encPass.text;
-        bodyCount += encPass.count;
-      }
-      const rawBody = replaceIdOccurrences(body, id, ID_MARKER_RAW);
-      body = rawBody.text;
-      bodyCount += rawBody.count;
-    }
-
-    if (urlCount + bodyCount === 0) return null;
-    return { method, urlTemplate: url, bodyTemplate: body };
-  }
-
-  function applyRequestTemplate(template, articleId) {
-    const id = String(articleId ?? "").trim();
-    if (!template || !id) return null;
-    const sub = (s) =>
-      s == null
-        ? null
-        : String(s)
-            .split(ID_MARKER_ENC)
-            .join(encodeURIComponent(id))
-            .split(ID_MARKER_RAW)
-            .join(id);
-    return {
-      method: template.method || "GET",
-      url: sub(template.urlTemplate),
-      body: sub(template.bodyTemplate),
-    };
-  }
-
   function filterAuthHeaders(headers) {
     const out = {};
     const src = headers && typeof headers === "object" ? headers : {};
@@ -198,8 +67,7 @@
     return out;
   }
 
-  // Ищет в списке перехваченных записей (новые в конце) свежие авторизационные
-  // заголовки. Возвращает {} если ничего похожего не нашлось.
+  // Свежие авторизационные заголовки из перехваченного трафика (новые в конце).
   function latestAuthHeaders(entries) {
     const list = Array.isArray(entries) ? entries : [];
     for (let i = list.length - 1; i >= 0; i--) {
@@ -209,146 +77,19 @@
     return {};
   }
 
-  function parseEntryJson(entry) {
-    const text = String(entry?.responseText || "");
-    if (!text) return null;
-    try {
-      return JSON.parse(text);
-    } catch {
-      return null;
-    }
-  }
-
   function nonEmptySnapshotFields(snapshot) {
     const out = [];
     for (const field of SCRAPE_FIELDS) {
       const v = snapshot?.[field];
       if (field === "price") {
-        if (Number.isFinite(Number(v))) out.push(field);
+        // Number(null) и Number("") конечны — иначе страница без суммы
+        // считалась бы эталоном с ценой 0 и давала ложное расхождение.
+        if (v != null && v !== "" && Number.isFinite(Number(v))) out.push(field);
         continue;
       }
       if (normalizeCompareText(v)) out.push(field);
     }
     return out;
-  }
-
-  // Обучение на первом объекте: ищем среди перехваченных ответов тот, где
-  // лежат значения DOM-снапшота, и который можно параметризовать нашим ID.
-  // Возвращает кандидата с шаблоном запроса и наборами путей-кандидатов на
-  // каждое поле (окончательный выбор — после сверки на втором объекте).
-  function learnFromEntries(entries, articleId, snapshot) {
-    const list = Array.isArray(entries) ? entries : [];
-    const fields = nonEmptySnapshotFields(snapshot);
-    if (!fields.length) return null;
-    let best = null;
-    for (const entry of list) {
-      if (!entry || (Number(entry.status) || 0) !== 200) continue;
-      const template = buildRequestTemplate(entry, articleId);
-      if (!template) continue;
-      const json = parseEntryJson(entry);
-      if (json == null) continue;
-      const paths = collectJsonPaths(json);
-      const fieldCandidates = {};
-      let matched = 0;
-      for (const field of fields) {
-        const expected = snapshot[field];
-        const cands = [];
-        for (const p of paths) {
-          if (valuesEqualLoose(p.value, expected)) cands.push(p.path);
-        }
-        if (cands.length) {
-          // Короткие пути надёжнее глубинных совпадений.
-          cands.sort((a, b) => a.length - b.length);
-          fieldCandidates[field] = cands.slice(0, 12);
-          matched += 1;
-        }
-      }
-      const coreMatched = CORE_FIELDS.every((f) =>
-        fields.includes(f) ? Boolean(fieldCandidates[f]) : true
-      );
-      if (!coreMatched || matched < Math.min(4, fields.length)) continue;
-      const score = matched * 1000 - String(entry.responseText || "").length / 100000;
-      if (!best || score > best.score) {
-        best = {
-          score,
-          template,
-          fieldCandidates,
-          entryUrl: String(entry.url || ""),
-        };
-      }
-    }
-    if (!best) return null;
-    return {
-      template: best.template,
-      fieldCandidates: best.fieldCandidates,
-      entryUrl: best.entryUrl,
-    };
-  }
-
-  // Сверка на втором объекте: для каждого поля оставляем путь, значение по
-  // которому совпадает с DOM-эталоном второго объекта. Требуем покрыть все
-  // непустые поля второго снапшота и все базовые поля.
-  function refineMapping(fieldCandidates, json2, snapshot2) {
-    const required = nonEmptySnapshotFields(snapshot2);
-    for (const core of CORE_FIELDS) {
-      if (!required.includes(core)) required.push(core);
-    }
-    const mapping = {};
-    const mismatches = [];
-    for (const field of required) {
-      const expected = snapshot2?.[field];
-      const cands = Array.isArray(fieldCandidates?.[field]) ? fieldCandidates[field] : [];
-      let chosen = null;
-      for (const path of cands) {
-        const got = getByPath(json2, path);
-        if (valuesEqualLoose(got, expected)) {
-          chosen = path;
-          break;
-        }
-      }
-      if (!chosen) {
-        mismatches.push(field);
-        continue;
-      }
-      mapping[field] = { path: chosen, kind: field === "price" ? "number" : "string" };
-    }
-    if (mismatches.length) return { ok: false, mismatches };
-    return { ok: true, mapping };
-  }
-
-  // Извлечение снапшота по обученному маппингу. Непокрытые поля — пустые
-  // строки; невозможность прочитать ОБУЧЕННОЕ поле — отказ (объект уйдёт в DOM).
-  function extractSnapshotByMapping(json, mapping) {
-    const snapshot = {};
-    const missing = [];
-    for (const field of SCRAPE_FIELDS) {
-      const m = mapping?.[field];
-      if (!m) {
-        snapshot[field] = field === "price" ? 0 : "";
-        continue;
-      }
-      const raw = getByPath(json, m.path);
-      if (m.kind === "number") {
-        const n = parseLooseNumber(raw);
-        if (!Number.isFinite(n)) {
-          missing.push(field);
-          continue;
-        }
-        snapshot[field] = n;
-        continue;
-      }
-      if (raw == null) {
-        snapshot[field] = "";
-        continue;
-      }
-      if (typeof raw === "object") {
-        missing.push(field);
-        continue;
-      }
-      snapshot[field] = normalizeCompareText(raw);
-    }
-    if (missing.length) return { ok: false, missing };
-    return { ok: true, snapshot };
   }
 
   function snapshotsMatch(a, b, fields) {
@@ -380,16 +121,6 @@
     return { matched: "", seen: true };
   }
 
-  function extractedSnapshotLooksSane(snapshot) {
-    if (!snapshot || typeof snapshot !== "object") return false;
-    if (!Number.isFinite(Number(snapshot.price))) return false;
-    if (!normalizeCompareText(snapshot.nomenclature)) return false;
-    if (!normalizeCompareText(snapshot.articleId) && !normalizeCompareText(snapshot.shipment)) {
-      return false;
-    }
-    return true;
-  }
-
   // Общий на все окна ограничитель нагрузки (токен-бакет, асинхронный).
   function createRequestPacer(rps) {
     const rate = Math.max(0, Number(rps) || 0);
@@ -407,15 +138,18 @@
     };
   }
 
-  // Машина состояний probe → on → off с переучиванием после 401 и защитой
-  // от тихого расхождения (контрольные сверки).
+  // Машина состояний одного «канала» чтения: probe → on → off. Заводится
+  // отдельно на каждый тип отправления, чтобы сбой одного типа не отключал
+  // быстрое чтение остальных.
   function createApiModeController(opts = {}) {
+    const okProbesToEnable = Math.max(1, Number(opts.okProbesToEnable) || 2);
     const maxProbeFails = Math.max(1, Number(opts.maxProbeFails) || 2);
     const maxRelearnFails = Math.max(1, Number(opts.maxRelearnFails) || 2);
     const maxMiscompares = Math.max(1, Number(opts.maxMiscompares) || 2);
     const st = {
       phase: "probe",
       reason: "",
+      okProbes: 0,
       probeFails: 0,
       relearnFails: 0,
       miscompares: 0,
@@ -432,15 +166,21 @@
       probeFail(reason) {
         if (st.phase !== "probe") return st.phase;
         st.probeFails += 1;
+        st.okProbes = 0;
         if (st.probeFails >= maxProbeFails) off(reason || "probe-failed");
         return st.phase;
       },
+      // Успешная сверка на probe: включаемся только после нескольких подряд.
       probeSuccess() {
-        if (st.phase === "probe") st.phase = "on";
+        if (st.phase !== "probe") return st.phase;
+        st.okProbes += 1;
+        if (st.okProbes >= okProbesToEnable) st.phase = "on";
         return st.phase;
       },
       batch401() {
-        if (st.phase !== "on") return st.phase;
+        // Считаем 401 и на probe: иначе постоянный отказ авторизации крутил бы
+        // переучивание на каждом объекте бесконечно.
+        if (st.phase === "off") return st.phase;
         if (st.postRelearn) {
           st.relearnFails += 1;
           st.postRelearn = false;
@@ -479,6 +219,7 @@
         return {
           phase: st.phase,
           reason: st.reason,
+          okProbes: st.okProbes,
           probeFails: st.probeFails,
           relearnFails: st.relearnFails,
           miscompares: st.miscompares,
@@ -489,24 +230,14 @@
 
   return {
     SCRAPE_FIELDS,
-    CORE_FIELDS,
     normalizeCompareText,
     parseLooseNumber,
     valuesEqualLoose,
-    collectJsonPaths,
-    getByPath,
-    replaceIdOccurrences,
-    buildRequestTemplate,
-    applyRequestTemplate,
     filterAuthHeaders,
     latestAuthHeaders,
-    learnFromEntries,
-    refineMapping,
-    extractSnapshotByMapping,
-    snapshotsMatch,
-    extractedSnapshotLooksSane,
-    resolveOpsWarehouse,
     nonEmptySnapshotFields,
+    snapshotsMatch,
+    resolveOpsWarehouse,
     createRequestPacer,
     createApiModeController,
   };
