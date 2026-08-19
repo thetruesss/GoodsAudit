@@ -2729,6 +2729,7 @@ function apiChannelTitle(name) {
 function formatApiDiagnostics(job) {
   const stats = job?.readStats;
   const channels = job?.apiChannels;
+  const fallbacks = job?.apiFallbacks;
   if (!stats && !channels) return "";
   const lines = [];
   const api = Math.max(0, Number(stats?.api) || 0);
@@ -2736,18 +2737,32 @@ function formatApiDiagnostics(job) {
   if (api + dom > 0) {
     lines.push(`\nБыстрое чтение: через API ${api}, страницей ${dom}.`);
   }
+  // Почему читали страницей — с частотой каждой причины.
+  if (Array.isArray(fallbacks) && fallbacks.length) {
+    const parts = fallbacks
+      .filter((f) => f && f.reason)
+      .map((f) => `${f.reason} — ${Math.max(0, Number(f.count) || 0)}`);
+    if (parts.length) lines.push(`Причины чтения страницей: ${parts.join("; ")}.`);
+  }
   if (channels && typeof channels === "object") {
     for (const [name, info] of Object.entries(channels)) {
-      if (!info || info.phase !== "off") continue;
+      if (!info || info.phase === "on") continue;
       const title = apiChannelTitle(name);
       const samples = Array.isArray(info.samples) ? info.samples : [];
-      if (samples.length) {
-        const detail = samples
-          .map((s) => `${s.field}: API «${s.api}» ≠ страница «${s.dom}»`)
-          .join("; ");
-        lines.push(`API отключён (${title}): ${detail}`);
+      const detail = samples.length
+        ? samples.map((s) => `${s.field}: API «${s.api}» ≠ страница «${s.dom}»`).join("; ")
+        : info.reason || info.lastError || "";
+      if (info.phase === "off") {
+        lines.push(`API отключён (${title}): ${detail || "сбой чтения"}`);
+      } else if (detail) {
+        // Канал ещё проверяется — но причина, по которой он не включился,
+        // важнее молчания: без неё непонятно, почему нет ускорения.
+        lines.push(`API проверяется (${title}): ${detail}`);
       } else {
-        lines.push(`API отключён (${title}): ${info.reason || info.lastError || "сбой чтения"}`);
+        lines.push(`API проверяется (${title}): сверка со страницей ещё идёт`);
+      }
+      if (Array.isArray(info.learned) && info.learned.length) {
+        lines.push(`Выучены подписи: ${info.learned.join("; ")}`);
       }
     }
   }
