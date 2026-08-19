@@ -36,6 +36,38 @@ test("posting: живой ответ раскладывается в поля к
   assert.strictEqual(snap.unsupportedTransitBox, false);
 });
 
+test("statusAlps: код переводится в подпись, как на странице", () => {
+  const info = Object.assign({}, POSTING_INFO, { alpsStatus: "completed" });
+  const snap = RT.mapPosting(info, POSTING_CONTENT);
+  assert.strictEqual(snap.statusAlps, "Завершен", "completed → Завершен");
+  assert.strictEqual(RT.alpsLabel("waitingForSeller"), "Готов к выдаче");
+  assert.strictEqual(RT.alpsLabel("deficitRevealed"), "Недостача");
+  assert.strictEqual(RT.alpsLabel(""), "", "пустой код → пусто");
+  // Незнакомый код ALPS отправляет объект на страницу, а не подставляет пустоту.
+  assert.strictEqual(
+    RT.snapshotHasUnknownCodes("posting", {
+      lozonState: "lost",
+      deliverySchema: "fbs",
+      alpsStatus: "brandNewAlpsState",
+    }),
+    true
+  );
+});
+
+test("boxTransit: ALPS-статус тоже подписью, unknown скрыт", () => {
+  const base = {
+    info: {
+      id: 5,
+      mainInfo: { containerName: "1019751004201754", deliverySchema: "fbo" },
+      placeInfo: {},
+      statuses: { lozonState: "banded", returnStatus: "utilization" },
+    },
+  };
+  assert.strictEqual(RT.mapTransitBox(base, null).statusAlps, "Утилизируется");
+  base.info.statuses.returnStatus = "unknown";
+  assert.strictEqual(RT.mapTransitBox(base, null).statusAlps, "", "unknown → поле скрыто");
+});
+
 test("posting C2C: страница прячет сумму и собственника — прячем и мы", () => {
   const info = Object.assign({}, POSTING_INFO, { deliverySchema: "delivery" });
   const snap = RT.mapPosting(info, POSTING_CONTENT);
@@ -72,7 +104,7 @@ test("exemplar: маппинг основных полей карточки эк
     currentWarehouseName: "МО_ИСТРА_ХАБ",
     contractCustomerName: "ООО Ромашка",
     lozonExemplarState: "taken",
-    alpsStatus: "onHand",
+    alpsStatus: "completed",
   };
   const snap = RT.mapExemplar(info);
   assert.strictEqual(snap.articleId, "701883311344000");
@@ -83,7 +115,7 @@ test("exemplar: маппинг основных полей карточки эк
   assert.strictEqual(snap.formationWarehouse, "СЦ Хоругвино");
   assert.strictEqual(snap.owner, "ООО Ромашка");
   assert.strictEqual(snap.statusLozon, "Прибыл в место назначения", "taken → подпись");
-  assert.strictEqual(snap.statusAlps, "onHand");
+  assert.strictEqual(snap.statusAlps, "Завершен", "completed → Завершен");
   assert.strictEqual(snap.shipment, "", "номера отправления в карточке экземпляра нет");
 });
 
@@ -104,7 +136,7 @@ test("boxTransit: маппинг транзитной коробки", () => {
         currentPlace: { id: 2, name: "МО_ИСТРА_ХАБ" },
         destinationPlace: { id: 3, name: "ОМСК_714" },
       },
-      statuses: { lozonState: "banded", returnStatus: "shortTermStorage" },
+      statuses: { lozonState: "banded", returnStatus: "utilization" },
     },
   };
   const content = { exemplars: [{ modelName: "Телевизор LG 55" }] };
@@ -117,7 +149,7 @@ test("boxTransit: маппинг транзитной коробки", () => {
   assert.strictEqual(snap.formationWarehouse, "СЦ Софьино");
   assert.strictEqual(snap.owner, "ООО Селлер");
   assert.strictEqual(snap.statusLozon, "Сформирован", "banded → Сформирован");
-  assert.strictEqual(snap.statusAlps, "shortTermStorage");
+  assert.strictEqual(snap.statusAlps, "Утилизируется", "utilization → подпись");
   assert.strictEqual(snap.isTransitBox, true);
 });
 

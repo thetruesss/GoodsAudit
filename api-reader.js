@@ -48,8 +48,12 @@
 
     // Отдельная машина состояний на каждый «канал» (тип отправления) плюс свой
     // счётчик прочитанного — чтобы редкий тип тоже регулярно сверялся с DOM.
-    const channels = new Map();
-    const channelCounters = new Map();
+    // Состояние общее на все потоки (передаётся снаружи): иначе каждое окно
+    // пробовало бы типы заново и вело свою статистику. Токены при этом у
+    // каждого потока свои — их общими делать нельзя.
+    const channels = opts.sharedChannels instanceof Map ? opts.sharedChannels : new Map();
+    const channelCounters =
+      opts.sharedCounters instanceof Map ? opts.sharedCounters : new Map();
     function channelFor(name) {
       const key = String(name || "unknown");
       if (!channels.has(key)) {
@@ -77,7 +81,7 @@
     }
     // Диагностика: почему по типу не включилось быстрое чтение. Показывается
     // пользователю, поэтому храним и сами расходящиеся значения (усечённо).
-    const diagnostics = new Map();
+    const diagnostics = opts.sharedDiagnostics instanceof Map ? opts.sharedDiagnostics : new Map();
     function noteDiag(name, patch) {
       const key = String(name || "unknown");
       const prev = diagnostics.get(key) || {};
@@ -90,7 +94,8 @@
 
     // Сквозной учёт: каждый уход на страницу считается с причиной, чтобы не
     // осталось ни одного молчаливого фолбэка.
-    const fallbackReasons = new Map();
+    const fallbackReasons =
+      opts.sharedFallbacks instanceof Map ? opts.sharedFallbacks : new Map();
     function countFallback(reason) {
       const key = String(reason || "без причины");
       fallbackReasons.set(key, (fallbackReasons.get(key) || 0) + 1);
@@ -117,7 +122,7 @@
     let authHeaders = {};
     let domainKnownOk = false;
     // Тип уже известен по объекту — не тратим лишний запрос при повторном заходе.
-    const typeCache = new Map();
+    const typeCache = opts.sharedTypeCache instanceof Map ? opts.sharedTypeCache : new Map();
 
     function absorbAuthFromEntries(entries) {
       const fresh = M.latestAuthHeaders(entries);
