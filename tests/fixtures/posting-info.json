@@ -1,0 +1,28 @@
+{
+  "lozonId": 501883634205000,
+  "deliverySchema": "fbs",
+  "number": "0136207144-0017-1",
+  "price": { "value": 9877, "currency": "RUB" },
+  "lozonState": "lost",
+  "containsDangerousItems": false,
+  "containsPharmacyItems": false,
+  "containsJewelry": false,
+  "containsFreshItems": false,
+  "isUtilization": false,
+  "formationWarehouseId": 1020001843122000,
+  "formationWarehouseName": "FBS/2156699/Чагинская (мир чехлов)",
+  "currentWarehouseId": 1020000032914000,
+  "currentWarehouseName": "МО_ИСТРА_ДО",
+  "destinationPlaceId": 1020002913800000,
+  "destinationPlaceName": "ОМСК_714",
+  "contractId": 24680709081000,
+  "contractCustomerName": "Спренченат Сергей Анатольевич, ИП",
+  "contractName": "МП ИР-199040/24 от 09.07.2024",
+  "isReturn": false,
+  "barcodes": [
+    { "value": "501883634205000", "type": "unknown" },
+    { "value": "%101%47727476952", "type": "unknown" }
+  ],
+  "scanIt": null,
+  "alpsStatus": null
+}

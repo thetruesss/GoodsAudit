@@ -1,14 +1,15 @@
 // Перехватчик сетевого трафика страницы (MAIN world, document_start).
-// Патчит fetch и XMLHttpRequest, чтобы снять реальные запросы страницы вместе
-// с их заголовками авторизации и телами ответов. Ничего никуда не отправляет —
-// только пишет в оконный буфер, который фон читает через executeScript.
-// Заголовки Authorization в HAR вырезаются (см. ТЗ), поэтому снимаем их живьём.
+// Патчит fetch и XMLHttpRequest, чтобы снять заголовки авторизации, которые
+// страница выставляет сама. Ничего никуда не отправляет — только пишет в
+// небольшой оконный буфер, который фон читает через executeScript.
+// В HAR Authorization/Cookie вырезаются, поэтому снять их можно лишь живьём.
 (function () {
   if (window.__gaCaptureInstalled) return;
   window.__gaCaptureInstalled = true;
 
-  var MAX_ENTRIES = 80;
-  var MAX_BODY_CHARS = 2_000_000;
+  // Нужны только заголовки авторизации и адреса — тела ответов не храним:
+  // буфер целиком копируется в фон, и лишние мегабайты там ни к чему.
+  var MAX_ENTRIES = 20;
   var buffer = [];
   window.__gaCapturedRequests = buffer;
 
@@ -66,12 +67,23 @@
     return out;
   }
 
-  function bodyToString(body) {
+  // Только заголовки, похожие на авторизационные: токены в буфере не нужны
+  // целиком, а всё остальное — лишний вес.
+  var AUTH_PREFIXES = ["x-o3-", "x-csrf", "x-xsrf", "x-auth"];
+  function keepAuthHeaders(headers) {
+    var out = {};
     try {
-      if (body == null) return null;
-      if (typeof body === "string") return body.length <= MAX_BODY_CHARS ? body : null;
+      Object.keys(headers || {}).forEach(function (name) {
+        var low = String(name).toLowerCase();
+        var isAuth =
+          low === "authorization" ||
+          AUTH_PREFIXES.some(function (p) {
+            return low.indexOf(p) === 0;
+          });
+        if (isAuth) out[low] = String(headers[name]);
+      });
     } catch (e) {}
-    return null;
+    return out;
   }
 
   // --- fetch ---------------------------------------------------------------
@@ -81,7 +93,6 @@
       var url;
       var method;
       var reqHeaders = {};
-      var reqBody = null;
       try {
         if (input && typeof input === "object" && "url" in input) {
           url = input.url;
@@ -97,34 +108,18 @@
             reqHeaders[k] = extra[k];
           });
         }
-        if (init && init.body != null) reqBody = bodyToString(init.body);
       } catch (e) {}
 
       var promise = origFetch.apply(this, arguments);
       try {
-        if (url && sameOrigin(url) && looksLikeApiUrl(url)) {
-          promise
-            .then(function (resp) {
-              try {
-                var clone = resp.clone();
-                clone
-                  .text()
-                  .then(function (text) {
-                    pushEntry({
-                      url: String(url),
-                      method: String(method || "GET").toUpperCase(),
-                      headers: reqHeaders,
-                      body: reqBody,
-                      status: resp.status,
-                      responseText: text && text.length <= MAX_BODY_CHARS ? text : "",
-                      at: Date.now(),
-                    });
-                  })
-                  .catch(function () {});
-              } catch (e) {}
-              return resp;
-            })
-            .catch(function () {});
+        var auth = keepAuthHeaders(reqHeaders);
+        if (url && sameOrigin(url) && looksLikeApiUrl(url) && Object.keys(auth).length) {
+          pushEntry({
+            url: String(url),
+            method: String(method || "GET").toUpperCase(),
+            headers: auth,
+            at: Date.now(),
+          });
         }
       } catch (e) {}
       return promise;
@@ -157,27 +152,15 @@
         try {
           var cap = this.__gaCap;
           if (cap && sameOrigin(cap.url) && looksLikeApiUrl(cap.url)) {
-            cap.body = bodyToString(body);
-            var xhr = this;
-            this.addEventListener("load", function () {
-              try {
-                var text = "";
-                try {
-                  text = xhr.responseType === "" || xhr.responseType === "text"
-                    ? String(xhr.responseText || "")
-                    : "";
-                } catch (e) {}
-                pushEntry({
-                  url: cap.url,
-                  method: String(cap.method || "GET").toUpperCase(),
-                  headers: cap.headers,
-                  body: cap.body,
-                  status: xhr.status,
-                  responseText: text && text.length <= MAX_BODY_CHARS ? text : "",
-                  at: Date.now(),
-                });
-              } catch (e) {}
-            });
+            var auth = keepAuthHeaders(cap.headers);
+            if (Object.keys(auth).length) {
+              pushEntry({
+                url: cap.url,
+                method: String(cap.method || "GET").toUpperCase(),
+                headers: auth,
+                at: Date.now(),
+              });
+            }
           }
         } catch (e) {}
         return origSend.apply(this, arguments);
