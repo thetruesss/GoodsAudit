@@ -1978,6 +1978,11 @@ async function runJobFromState(startPayload) {
       ? globalThis.__gaApiMapping.createRequestPacer(apiPrefs.rps)
       : null;
   const readStats = { api: 0, dom: 0 };
+  const apiUnavailableReason = !apiPrefs.enabled
+    ? "выключено в настройках"
+    : !globalThis.__gaApiReader
+      ? "модуль быстрого чтения не загрузился"
+      : "";
   let apiLogShown = false;
   const logApi = (msg) => {
     try {
@@ -2224,6 +2229,12 @@ async function runJobFromState(startPayload) {
           if (readPath === "api") readStats.api += 1;
           else readStats.dom += 1;
           job.readStats = { api: readStats.api, dom: readStats.dom };
+          // Диагностика быстрого чтения: попадает в «Результат», чтобы было
+          // видно, почему тот или иной тип читается страницей.
+          if (reader) job.apiChannels = reader.snapshot();
+          else if (apiUnavailableReason) {
+            job.apiChannels = { off: { phase: "off", reason: apiUnavailableReason } };
+          }
           speedCtl.reportItem({
             ok: true,
             slow:

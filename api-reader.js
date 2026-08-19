@@ -75,6 +75,19 @@
     function channelCounter(name) {
       return channelCounters.get(String(name || "unknown")) || 0;
     }
+    // Диагностика: почему по типу не включилось быстрое чтение. Показывается
+    // пользователю, поэтому храним и сами расходящиеся значения (усечённо).
+    const diagnostics = new Map();
+    function noteDiag(name, patch) {
+      const key = String(name || "unknown");
+      const prev = diagnostics.get(key) || {};
+      diagnostics.set(key, Object.assign(prev, patch));
+    }
+    function shortValue(v) {
+      const s = String(v ?? "");
+      return s.length > 60 ? s.slice(0, 57) + "…" : s;
+    }
+
     // Ошибка чтения по каналу: на probe это неудачная проба, в режиме on —
     // расхождение доверия. Без этого сломанная ручка никогда не отключалась бы.
     function reportChannelFailure(name, reason) {
@@ -82,6 +95,7 @@
       const phase = ctl.getPhase();
       if (phase === "probe") ctl.probeFail(reason);
       else if (phase === "on") ctl.miscompare();
+      noteDiag(name, { lastError: String(reason || "") });
       if (ctl.getPhase() === "off") {
         log(`API: отключаю тип «${name}» (${ctl.getReason() || reason}) — дальше страницами.`);
       }
@@ -331,8 +345,17 @@
           } else {
             ctl.miscompare();
           }
+          // Запоминаем сами расходящиеся значения — по ним сразу видно,
+          // где маппинг разошёлся с вёрсткой.
+          const domSnap = snapshotFromDomData(domData);
+          const samples = cmp.mismatches.slice(0, 4).map((field) => ({
+            field,
+            api: shortValue(apiData?.[field]),
+            dom: shortValue(domSnap?.[field]),
+          }));
+          noteDiag(channel, { mismatches: cmp.mismatches.slice(0, 8), samples });
           log(
-            `API: расхождение с страницей по типу «${channel}» ` +
+            `API: расхождение со страницей по типу «${channel}» ` +
               `(${cmp.mismatches.join(",")}) — беру данные страницы` +
               (ctl.getPhase() === "off" ? ", тип отключён" : "")
           );
@@ -352,7 +375,9 @@
       getPhase: (channel) => channelFor(channel || "posting").getPhase(),
       snapshot: () => {
         const out = {};
-        for (const [name, ctl] of channels.entries()) out[name] = ctl.snapshot();
+        for (const [name, ctl] of channels.entries()) {
+          out[name] = Object.assign(ctl.snapshot(), diagnostics.get(name) || {});
+        }
         return out;
       },
     };

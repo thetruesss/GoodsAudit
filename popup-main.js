@@ -2709,6 +2709,51 @@ function getJobProgressDone(job) {
   return ok + err + skippedOps;
 }
 
+const API_CHANNEL_TITLES = {
+  posting: "отправления",
+  exemplar: "экземпляры",
+  boxTransit: "транзитные коробки",
+  resolve: "определение типа",
+  off: "быстрое чтение",
+};
+
+function apiChannelTitle(name) {
+  const key = String(name || "");
+  if (API_CHANNEL_TITLES[key]) return API_CHANNEL_TITLES[key];
+  if (key.startsWith("unsupported:")) return `неподдерживаемый тип «${key.slice(12)}»`;
+  return key;
+}
+
+// Почему быстрое чтение не ускорило прогон: показываем путь чтения и причину,
+// по которой тип вернулся на страницы (с конкретными расхождениями).
+function formatApiDiagnostics(job) {
+  const stats = job?.readStats;
+  const channels = job?.apiChannels;
+  if (!stats && !channels) return "";
+  const lines = [];
+  const api = Math.max(0, Number(stats?.api) || 0);
+  const dom = Math.max(0, Number(stats?.dom) || 0);
+  if (api + dom > 0) {
+    lines.push(`\nБыстрое чтение: через API ${api}, страницей ${dom}.`);
+  }
+  if (channels && typeof channels === "object") {
+    for (const [name, info] of Object.entries(channels)) {
+      if (!info || info.phase !== "off") continue;
+      const title = apiChannelTitle(name);
+      const samples = Array.isArray(info.samples) ? info.samples : [];
+      if (samples.length) {
+        const detail = samples
+          .map((s) => `${s.field}: API «${s.api}» ≠ страница «${s.dom}»`)
+          .join("; ");
+        lines.push(`API отключён (${title}): ${detail}`);
+      } else {
+        lines.push(`API отключён (${title}): ${info.reason || info.lastError || "сбой чтения"}`);
+      }
+    }
+  }
+  return lines.length ? lines.join("\n") : "";
+}
+
 function formatStatus(job) {
   if (!job) {
     return [
@@ -2763,6 +2808,8 @@ function formatStatus(job) {
     );
   }
   if (job.sourceName) lines.push(`\nФайл: ${job.sourceName}`);
+  const apiDiag = formatApiDiagnostics(job);
+  if (apiDiag) lines.push(`\n${apiDiag.replace(/^\n/, "")}`);
   if (job.phase === "done" || job.phase === "aborted") {
     if (job.errors?.length) {
       const shown = job.errors.slice(0, MAX_STATUS_DETAIL_LINES);

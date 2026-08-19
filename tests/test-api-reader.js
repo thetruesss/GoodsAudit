@@ -380,6 +380,31 @@ test("фильтр опер. складов: чужой склад пустее�
   assert.strictEqual(r.data.operationalWarehouseSeen, true, "склад на карточке был");
 });
 
+test("диагностика: причина отключения содержит поле и оба значения", async () => {
+  const ids = ["501883634205400", "501883634205401"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  // Страница «показывает» другой статус, чем даёт API.
+  const { deps } = makeDriver({
+    infos,
+    contents,
+    domOverride: (snap) => Object.assign({}, snap, { status: "Активный" }),
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
+  await reader.read({ articleId: ids[0] });
+  await reader.read({ articleId: ids[1] });
+  const diag = reader.snapshot();
+  assert.strictEqual(diag.posting.phase, "off");
+  assert.ok(diag.posting.mismatches.includes("status"), "поле расхождения записано");
+  const sample = diag.posting.samples.find((s) => s.field === "status");
+  assert.strictEqual(sample.api, "Недостача");
+  assert.strictEqual(sample.dom, "Активный");
+});
+
 test("периодическая сверка: каждый N-й объект перепроверяется страницей", async () => {
   const ids = [];
   const infos = {};
