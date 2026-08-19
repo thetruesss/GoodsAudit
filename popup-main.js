@@ -444,6 +444,7 @@ let outputPrefs = {
   opsWarehouses: [],
   threadsChoice: "auto",
   lastManualThreads: 5,
+  apiReadEnabled: true,
   uiGradient: true,
   aggressiveMode: false,
   excludeMemoryIds: false,
@@ -3361,6 +3362,13 @@ function applyExcludeMemoryIdsToDom() {
   if (toggle.checked !== on) toggle.checked = on;
 }
 
+function applyApiReadToDom() {
+  const toggle = $("apiReadToggle");
+  if (!toggle) return;
+  const on = outputPrefs.apiReadEnabled !== false;
+  if (toggle.checked !== on) toggle.checked = on;
+}
+
 function applyHyperlinksToDom() {
   const on = areHyperlinksEnabled();
   const toggle = $("hyperlinksToggle");
@@ -3389,6 +3397,7 @@ function applyOutputPrefsToUi(opts = {}) {
   applyUiGradientToDom();
   applyAggressiveModeToDom();
   applyExcludeMemoryIdsToDom();
+  applyApiReadToDom();
   applyHyperlinksToDom();
   refreshThresholdDependentLabels();
   const settingsOpen = $("panelSettings") && !$("panelSettings").hidden;
@@ -3537,6 +3546,7 @@ function buildPresetDataFromCurrent() {
     layoutLt: cloneLayoutForPrefs(outputPrefs.layoutLt),
     opsWarehouses: getOpsWarehousesList(),
     threadsChoice: normalizeThreadsChoice(outputPrefs.threadsChoice),
+    apiReadEnabled: outputPrefs.apiReadEnabled !== false,
     excludeMemoryIds: outputPrefs.excludeMemoryIds === true,
     aggressiveMode: outputPrefs.aggressiveMode === true,
     hyperlinksEnabled: areHyperlinksEnabled(),
@@ -3605,6 +3615,7 @@ async function applySettingsPreset(preset) {
   if (outputPrefs.threadsChoice !== "auto") {
     outputPrefs.lastManualThreads = Number(outputPrefs.threadsChoice);
   }
+  outputPrefs.apiReadEnabled = d.apiReadEnabled !== false;
   outputPrefs.excludeMemoryIds = d.excludeMemoryIds === true;
   outputPrefs.hyperlinksEnabled = d.hyperlinksEnabled !== false;
   outputPrefs.hyperlinkServiceArticleId = normalizeHyperlinkService(d.hyperlinkServiceArticleId);
@@ -3746,6 +3757,7 @@ function collectPopupPrefs() {
     selectedPresetId: String(selectedPresetId || ""),
     threadsChoice: normalizeThreadsChoice(outputPrefs.threadsChoice),
     lastManualThreads: getLastManualThreads(),
+    apiReadEnabled: outputPrefs.apiReadEnabled !== false,
     priceThreshold: $("priceThreshold")?.value ?? String(DEFAULT_PRICE_THRESHOLD),
     minPriceThreshold: $("minPriceThreshold")?.value ?? String(DEFAULT_MIN_PRICE_THRESHOLD),
     vulnerableMinPriceThreshold:
@@ -3791,6 +3803,7 @@ async function restorePopupPrefs() {
     raw.lastManualThreads,
     outputPrefs.threadsChoice === "auto" ? MANUAL_THREADS_DEFAULT : Number(outputPrefs.threadsChoice)
   );
+  outputPrefs.apiReadEnabled = raw.apiReadEnabled !== false;
   const restoredPriceThreshold = Number(raw.priceThreshold);
   outputPrefs.priceThreshold =
     Number.isFinite(restoredPriceThreshold) && restoredPriceThreshold >= 0
@@ -5080,6 +5093,12 @@ $("excludeMemoryIdsToggle")?.addEventListener("change", () => {
   })();
 });
 
+$("apiReadToggle")?.addEventListener("change", async () => {
+  outputPrefs.apiReadEnabled = Boolean($("apiReadToggle")?.checked);
+  applyApiReadToDom();
+  await savePopupPrefs();
+});
+
 $("hyperlinksToggle")?.addEventListener("change", async () => {
   outputPrefs.hyperlinksEnabled = Boolean($("hyperlinksToggle")?.checked);
   applyHyperlinksToDom();
@@ -5118,6 +5137,7 @@ function resetExtensionStateToFactory() {
     opsWarehouses: [""],
     threadsChoice: "auto",
     lastManualThreads: 5,
+    apiReadEnabled: true,
     uiGradient: true,
     aggressiveMode: false,
     excludeMemoryIds: false,

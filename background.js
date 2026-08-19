@@ -1,4 +1,4 @@
-importScripts("source-parse.js", "source-cache.js");
+importScripts("source-parse.js", "source-cache.js", "api-mapping.js", "api-reader.js");
 
 const JOB_STORAGE_LIST_CAP = 400;
 const RESULTS_CACHE_MAX_ENTRIES = 25000;
@@ -626,6 +626,114 @@ async function waitUntilArticlePage(
     await sleep(200);
   }
   throw new Error("Таймаут: страница не загрузилась (войдите на returns.o3t.ru)");
+}
+
+// --- API-чтение: браузерные примитивы для api-reader.js ---------------------
+const API_READ_DEFAULT_RPS = 25;
+const ARTICLE_ORIGIN = "https://returns.o3t.ru";
+
+async function getApiReadPrefs() {
+  try {
+    const { [POPUP_PREFS_KEY]: prefs } = await chrome.storage.local.get(POPUP_PREFS_KEY);
+    const enabled = prefs?.apiReadEnabled !== false; // по умолчанию включено
+    const parsedRps = Number(prefs?.apiReadRps);
+    const rps = Number.isFinite(parsedRps) && parsedRps > 0 ? parsedRps : API_READ_DEFAULT_RPS;
+    return { enabled, rps };
+  } catch {
+    return { enabled: true, rps: API_READ_DEFAULT_RPS };
+  }
+}
+
+async function captureAndClearOnTab(tabId) {
+  try {
+    const res = await new Promise((resolve, reject) => {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId },
+          world: "MAIN",
+          func: () => {
+            try {
+              const buf = window.__gaCapturedRequests;
+              if (!Array.isArray(buf)) return [];
+              const copy = buf.slice();
+              buf.length = 0;
+              return copy;
+            } catch (e) {
+              return [];
+            }
+          },
+        },
+        (r) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(r);
+        }
+      );
+    });
+    const list = res?.[0]?.result;
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+async function replayApiOnTab(tabId, req, headers) {
+  const res = await new Promise((resolve, reject) => {
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        world: "MAIN",
+        args: [req, headers || {}],
+        func: (request, extraHeaders) => {
+          const base = Object.assign(
+            { "content-type": "application/json", accept: "application/json" },
+            extraHeaders || {}
+          );
+          const init = {
+            method: request.method || "GET",
+            credentials: "include",
+            headers: base,
+          };
+          if (request.body != null && init.method !== "GET" && init.method !== "HEAD") {
+            init.body = request.body;
+          }
+          return fetch(request.url, init)
+            .then((r) =>
+              r
+                .text()
+                .then((t) => {
+                  let data = null;
+                  try {
+                    data = t ? JSON.parse(t) : null;
+                  } catch (e) {}
+                  return { status: r.status, body: data };
+                })
+                .catch(() => ({ status: r.status, body: null }))
+            )
+            .catch((e) => ({ status: 0, body: null, error: String(e) }));
+        },
+      },
+      (r) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(r);
+      }
+    );
+  });
+  return res?.[0]?.result || { status: 0, body: null };
+}
+
+async function isTabOnArticleOrigin(tabId) {
+  try {
+    const tab = await getTab(tabId);
+    return String(tab?.url || "").startsWith(ARTICLE_ORIGIN);
+  } catch {
+    return false;
+  }
 }
 
 async function scrapeArticleOnTab(
@@ -1850,6 +1958,20 @@ async function runJobFromState(startPayload) {
     ? opsWarehouses.map((x) => String(x || "").trim()).filter(Boolean)
     : [];
 
+  // Быстрое чтение через API: общий на все окна ограничитель нагрузки.
+  const apiPrefs = await getApiReadPrefs();
+  const requestPacer =
+    apiPrefs.enabled && globalThis.__gaApiMapping
+      ? globalThis.__gaApiMapping.createRequestPacer(apiPrefs.rps)
+      : null;
+  const readStats = { api: 0, dom: 0 };
+  let apiLogShown = false;
+  const logApi = (msg) => {
+    try {
+      console.log(`[GoodsAudit/${mode}] ${msg}`);
+    } catch {}
+  };
+
   let job = {
     phase: "running",
     abortRequested: false,
@@ -1857,6 +1979,7 @@ async function runJobFromState(startPayload) {
     sourceName,
     autoSpeed: manualThreads === 0,
     manualThreads,
+    apiReadEnabled: apiPrefs.enabled === true,
     speed: speedCtl.snapshot(),
     aggressiveMode: runConfig.aggressiveMode,
     threads,
@@ -1930,6 +2053,77 @@ async function runJobFromState(startPayload) {
     async function workerLoop(tabId, workerIndex) {
       let workerTabId = tabId;
       await sleep(Math.min(2000, workerIndex * 140));
+
+      // Контекст текущего объекта, чтобы инъектируемые в reader примитивы
+      // всегда видели актуальную вкладку, perf и обрабатываемый item.
+      const ctx = { perf: null, item: null };
+      const relearnTokenForWorker = async () => {
+        const it = ctx.item;
+        if (!it) return;
+        const url = `${BASE}${encodeURIComponent(it.articleId)}`;
+        try {
+          await new Promise((resolve, reject) => {
+            chrome.tabs.update(workerTabId, { url }, () => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+                return;
+              }
+              resolve();
+            });
+          });
+          await waitUntilArticlePage(
+            workerTabId,
+            it.articleId,
+            PAGE_LOAD_TIMEOUT_MS,
+            () => state.abortRequested,
+            () => state.pauseRequested
+          );
+          await sleep(300);
+          await waitForDataMarkers(
+            workerTabId,
+            MARKER_WAIT_MS,
+            () => state.abortRequested,
+            () => state.pauseRequested
+          );
+        } catch (e) {}
+      };
+      const readerDeps = {
+        domScrape: (it) =>
+          withTimeout(
+            scrapeArticleOnTab(
+              workerTabId,
+              it.articleId,
+              () => speedCtl.getSettleMs(),
+              Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob,
+              it.shipmentSource || "",
+              () => state.abortRequested,
+              () => state.pauseRequested,
+              ctx.perf
+            ),
+            ITEM_HARD_TIMEOUT_MS,
+            `Таймаут обработки в потоке (${Math.round(ITEM_HARD_TIMEOUT_MS / 1000)}с)`
+          ),
+        captureAndClear: () => captureAndClearOnTab(workerTabId),
+        replay: async (req, headers) => {
+          if (requestPacer) await requestPacer.take(1);
+          return replayApiOnTab(workerTabId, req, headers);
+        },
+        relearnToken: relearnTokenForWorker,
+        isOnHubDomain: () => isTabOnArticleOrigin(workerTabId),
+        log: (m) => {
+          logApi(m);
+          if (!apiLogShown) apiLogShown = true;
+        },
+      };
+      const reader =
+        apiPrefs.enabled && globalThis.__gaApiReader
+          ? globalThis.__gaApiReader.createHubApiReader(readerDeps, {
+              requireOpsField: opsListForJob.length > 0,
+              opsWarehouses: Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob,
+              verifyEveryN: 25,
+            })
+          : null;
+
       while (!state.abortRequested && (job.phase === "running" || job.phase === "paused")) {
         touchWorkerHeartbeat(mode);
         if (finalizeJobIfComplete(job, totalWorkItems)) {
@@ -1994,34 +2188,32 @@ async function runJobFromState(startPayload) {
         await persistJob(job, mode);
 
         const itemStartedAt = Date.now();
-        const perf = { attempts: 0, markersFound: true, cycles: 1 };
+        ctx.item = item;
+        ctx.perf = { attempts: 0, markersFound: true, cycles: 1 };
+        const perf = ctx.perf;
         try {
-
-          const opsForItem = Array.isArray(job.opsWarehouses)
-            ? job.opsWarehouses
-            : opsListForJob;
-          const data = await withTimeout(
-            scrapeArticleOnTab(
-              workerTabId,
-              item.articleId,
-              () => speedCtl.getSettleMs(),
-              opsForItem,
-              item.shipmentSource || "",
-              () => state.abortRequested,
-              () => state.pauseRequested,
-              perf
-            ),
-            ITEM_HARD_TIMEOUT_MS,
-            `Таймаут обработки в потоке (${Math.round(ITEM_HARD_TIMEOUT_MS / 1000)}с)`
-          );
+          let data;
+          let readPath = "dom";
+          if (reader) {
+            const rr = await reader.read(item);
+            data = rr.data;
+            readPath = rr.path;
+          } else {
+            data = await readerDeps.domScrape(item);
+          }
+          if (readPath === "api") readStats.api += 1;
+          else readStats.dom += 1;
+          job.readStats = { api: readStats.api, dom: readStats.dom };
           speedCtl.reportItem({
             ok: true,
-            slow: perf.attempts >= 3 || perf.markersFound === false || perf.cycles > 1,
+            slow:
+              readPath === "dom" &&
+              (perf.attempts >= 3 || perf.markersFound === false || perf.cycles > 1),
             durationMs: Date.now() - itemStartedAt,
           });
-          const opsList = Array.isArray(opsForItem)
-            ? opsForItem.map((x) => String(x || "").trim()).filter(Boolean)
-            : [];
+          const opsList = (Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob)
+            .map((x) => String(x || "").trim())
+            .filter(Boolean);
           const matchedOps = String(data.operationalWarehouse || "").trim();
           const opsSeen = Boolean(data.operationalWarehouseSeen);
           if (data.unsupportedTransitBox) {

@@ -502,6 +502,25 @@
 
               <section class="settings-group">
                 <h3 class="settings-group-title">Поведение и вид</h3>
+              <div class="field field-toggle field-with-help">
+                <span class="field-label-row">
+                  <span class="field-label">Быстрое чтение (API)</span>
+                  <span
+                    class="field-help"
+                    tabindex="0"
+                    role="button"
+                    aria-label="Справка: быстрое чтение через API"
+                    data-tip="Читает карточки прямым запросом к бэкенду вместо загрузки страницы — в разы быстрее и меньше нагрузка. При любом сбое расширение само возвращается к чтению через страницу. Отключите, если поведение показалось некорректным."
+                    >?</span>
+                </span>
+                <div class="field-toggle-row">
+                  <span class="field-toggle-text">Читать через API, если доступно</span>
+                  <label class="ui-switch">
+                    <input id="apiReadToggle" class="checkbox" type="checkbox" checked />
+                    <div class="ui-switch-track" aria-hidden="true"></div>
+                  </label>
+                </div>
+              </div>
               <div class="field field-toggle">
                 <span class="field-label">Стиль расширения</span>
                 <div class="field-toggle-row">
