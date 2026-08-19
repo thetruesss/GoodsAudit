@@ -23,7 +23,10 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (M, RT) {
   const DEFAULTS = {
     verifyEveryN: 25, // как часто в режиме on контрольно сверять API с DOM
-    okProbesToEnable: 2, // сколько удачных сверок подряд включают тип
+    // Одной сверки достаточно: совпасть должны все непустые поля карточки
+    // (цена, номенклатура, номер, id, склад, три статуса, схема) — случайно
+    // такое не совпадает. Каждая лишняя проба стоит полной загрузки страницы.
+    okProbesToEnable: 1,
     maxProbeFails: 2,
     maxRelearnFails: 2,
     maxMiscompares: 2,
@@ -212,7 +215,13 @@
         };
       }
 
-      const infoRes = await apiGet(RT.infoRequest(articleType, articleId));
+      // Карточку и её состав тянем одновременно — это экономит целый круг
+      // запросов на каждом объекте.
+      const contentReq = RT.contentRequest(articleType, articleId);
+      const [infoRes, contentResRaw] = await Promise.all([
+        apiGet(RT.infoRequest(articleType, articleId)),
+        contentReq ? apiGet(contentReq) : Promise.resolve(null),
+      ]);
       if (!infoRes.ok) {
         return { ok: false, needRelearn: infoRes.needRelearn === true, channel: articleType, error: infoRes.error || ("http-" + infoRes.status) };
       }
@@ -232,9 +241,8 @@
       }
 
       let content = null;
-      const contentReq = RT.contentRequest(articleType, articleId);
       if (contentReq) {
-        const contentRes = await apiGet(contentReq);
+        const contentRes = contentResRaw || { ok: false, status: 0 };
         if (!contentRes.ok) {
           return {
             ok: false,
@@ -254,14 +262,31 @@
     // Приводит сырой снапшот к виду DOM: склад проходит тот же фильтр опер.
     // складов, operationalWarehouseSeen отражает наличие склада на карточке,
     // затем применяется та же нормализация, что и к данным со страницы.
-    function toDomShape(snapshot, item) {
-      const ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsList);
+    function toDomShape(snapshot, item, opsOverride) {
+      const ops = opsOverride || M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsList);
       const withOps = Object.assign({}, snapshot, {
         operationalWarehouse: ops.matched,
         operationalWarehouseSeen: ops.seen,
       });
       if (typeof deps.normalize !== "function") return withOps;
       return deps.normalize(withOps, item);
+    }
+
+    // Когда фильтр складов задан, а текущее место — не наше, DOM-скрейпер идёт
+    // искать наш склад в блоке «Последняя перевозка». Повторяем это тем же
+    // запросом — иначе объекты «в пути» вечно расходились бы со страницей.
+    async function resolveOpsWithCarriage(articleType, articleId, snapshot) {
+      const ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsList);
+      if (ops.matched || !opsList.length) return ops;
+      const req = RT.lastCarriageRequest(articleType, articleId);
+      if (!req) return ops;
+      const res = await apiGet(req);
+      if (!res.ok) return ops;
+      for (const place of RT.carriagePlaceNames(res.body)) {
+        const hit = M.resolveOpsWarehouse(place, opsList);
+        if (hit.matched) return { matched: hit.matched, seen: true };
+      }
+      return ops;
     }
 
     async function domRead(item) {
@@ -314,11 +339,15 @@
       resolveCtl.probeSuccess();
       resolveCtl.batchOk();
 
-      // Шаг 2 — канал этого типа. У каждого неподдерживаемого типа свой канал:
-      // подтверждённый «pallet» не должен молча закрывать какой-нибудь другой тип.
+      // Шаг 2 — канал этого типа. Все неподдерживаемые типы идут одним каналом:
+      // страница показывает «Неподдерживаемый тип» вообще всему, что вне трёх
+      // типов профиля, поэтому механизм один и проверять его на каждый тип
+      // отдельно — только лишние загрузки страниц. Периодическая сверка на этом
+      // канале остаётся: если приложение научится показывать что-то ещё, она это
+      // поймает.
       const channel = RT.isSupportedType(resolved.articleType)
         ? resolved.articleType
-        : `${UNSUPPORTED_CHANNEL}:${resolved.articleType || "unknown"}`;
+        : UNSUPPORTED_CHANNEL;
       const ctl = channelFor(channel);
       if (ctl.getPhase() === "off") {
         return fallbackToDom(item, `тип «${channel}» отключён`);
@@ -356,7 +385,12 @@
       }
 
       const phase = ctl.getPhase();
-      const apiData = toDomShape(attempt.snapshot, item);
+      const opsResolved = await resolveOpsWithCarriage(
+        resolved.articleType,
+        resolved.articleId,
+        attempt.snapshot
+      );
+      const apiData = toDomShape(attempt.snapshot, item, opsResolved);
 
       // Канал ещё не подтверждён либо пришло время контрольной сверки —
       // читаем то же самое страницей и сравниваем поле в поле.
