@@ -380,6 +380,56 @@ test("фильтр опер. складов: чужой склад пустее�
   assert.strictEqual(r.data.operationalWarehouseSeen, true, "склад на карточке был");
 });
 
+test("ни один уход на страницу не остаётся без причины", async () => {
+  const ids = ["501883634205500", "501883634205501", "501883634205502"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    // Статус, которого нет во встроенном словаре, — молчаливый путь из прошлой версии.
+    infos[id] = postingInfo(id, { lozonState: "someBrandNewState" });
+    contents[id] = postingContent;
+  });
+  const { deps } = makeDriver({ infos, contents });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+  for (const id of ids) {
+    const r = await reader.read({ articleId: id });
+    assert.strictEqual(r.path, "dom");
+  }
+  const summary = reader.fallbackSummary();
+  assert.ok(summary.length > 0, "причины зафиксированы");
+  const total = summary.reduce((acc, x) => acc + x.count, 0);
+  assert.strictEqual(total, ids.length, "учтён каждый объект");
+  assert.ok(
+    summary.some((x) => x.reason.includes("неизвестный код")),
+    "причина названа явно: " + JSON.stringify(summary)
+  );
+});
+
+test("неизвестный код: подпись выучивается со страницы и API включается", async () => {
+  const ids = ["501883634205600", "501883634205601", "501883634205602", "501883634205603"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id, { lozonState: "freshBackendState" });
+    contents[id] = postingContent;
+  });
+  // Страница показывает человеческую подпись нового кода.
+  const { deps } = makeDriver({
+    infos,
+    contents,
+    domOverride: (snap) => Object.assign({}, snap, { statusLozon: "Новый статус", status: "Новый статус" }),
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+  const first = await reader.read({ articleId: ids[0] });
+  assert.strictEqual(first.path, "dom", "первый объект читается страницей");
+  // Дальше код уже известен: идут обычные пробы, затем API.
+  await reader.read({ articleId: ids[1] });
+  await reader.read({ articleId: ids[2] });
+  const r = await reader.read({ articleId: ids[3] });
+  assert.strictEqual(r.path, "api", "после обучения читаем через API");
+  assert.strictEqual(r.data.statusLozon, "Новый статус", "подпись взята со страницы");
+});
+
 test("диагностика: причина отключения содержит поле и оба значения", async () => {
   const ids = ["501883634205400", "501883634205401"];
   const infos = {};

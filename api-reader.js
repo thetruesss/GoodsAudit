@@ -88,6 +88,18 @@
       return s.length > 60 ? s.slice(0, 57) + "…" : s;
     }
 
+    // Сквозной учёт: каждый уход на страницу считается с причиной, чтобы не
+    // осталось ни одного молчаливого фолбэка.
+    const fallbackReasons = new Map();
+    function countFallback(reason) {
+      const key = String(reason || "без причины");
+      fallbackReasons.set(key, (fallbackReasons.get(key) || 0) + 1);
+    }
+    async function fallbackToDom(item, reason) {
+      countFallback(reason);
+      return domRead(item);
+    }
+
     // Ошибка чтения по каналу: на probe это неудачная проба, в режиме on —
     // расхождение доверия. Без этого сломанная ручка никогда не отключалась бы.
     function reportChannelFailure(name, reason) {
@@ -200,9 +212,18 @@
         return { ok: false, needRelearn: infoRes.needRelearn === true, channel: articleType, error: infoRes.error || ("http-" + infoRes.status) };
       }
       // Неизвестный нам код статуса/схемы означает, что на странице будет
-      // подпись, которой у нас нет — такой объект честнее дочитать страницей.
-      if (RT.snapshotHasUnknownCodes(articleType, infoRes.body)) {
-        return { ok: false, channel: articleType, error: "unknown-code" };
+      // подпись, которой у нас нет — такой объект честнее дочитать страницей,
+      // заодно подсмотрев на ней перевод кода.
+      const unknownCodes = RT.unknownCodesInInfo(articleType, infoRes.body);
+      if (unknownCodes.length) {
+        return {
+          ok: false,
+          channel: articleType,
+          error: "unknown-code",
+          unknownCodes,
+          info: infoRes.body,
+          articleType,
+        };
       }
 
       let content = null;
@@ -261,7 +282,9 @@
       // Разрешение типа перестало работать (нет прав/ручка закрыта) — дальше
       // только страницы, лишних запросов не делаем.
       const resolveCtl = channelFor("resolve");
-      if (resolveCtl.getPhase() === "off") return domRead(item);
+      if (resolveCtl.getPhase() === "off") {
+        return fallbackToDom(item, "определение типа отключено");
+      }
 
       await ensureOnDomain();
 
@@ -276,11 +299,12 @@
         }
       }
       if (!resolved || resolved.failed) {
-        reportChannelFailure("resolve", "resolve-failed");
+        const why = resolved?.status ? `http-${resolved.status}` : "нет ответа";
+        reportChannelFailure("resolve", `определение типа: ${why}`);
         if (resolveCtl.getPhase() === "off") {
           log("API: не удалось определить тип отправления — дальше читаю страницами.");
         }
-        return domRead(item);
+        return fallbackToDom(item, `определение типа: ${why}`);
       }
       resolveCtl.probeSuccess();
       resolveCtl.batchOk();
@@ -291,7 +315,9 @@
         ? resolved.articleType
         : `${UNSUPPORTED_CHANNEL}:${resolved.articleType || "unknown"}`;
       const ctl = channelFor(channel);
-      if (ctl.getPhase() === "off") return domRead(item);
+      if (ctl.getPhase() === "off") {
+        return fallbackToDom(item, `тип «${channel}» отключён`);
+      }
 
       let attempt = await apiReadDetails(resolved.articleType, resolved.articleId);
       if (!attempt.ok && attempt.needRelearn) {
@@ -305,12 +331,23 @@
 
       if (!attempt.ok) {
         // «Неизвестный код» — свойство конкретного объекта, а не поломка канала:
-        // такой объект просто дочитываем страницей. Остальные сбои копятся и
-        // в итоге отключают тип.
-        if (attempt.error !== "unknown-code") {
-          reportChannelFailure(channel, attempt.error || "read-failed");
+        // читаем его страницей и заодно узнаём перевод кода, чтобы следующие
+        // такие объекты уже шли через API.
+        if (attempt.error === "unknown-code") {
+          const codes = (attempt.unknownCodes || []).join(", ");
+          countFallback(`неизвестный код: ${codes}`);
+          const domRes = await domRead(item);
+          const learned = RT.learnLabelsFromDom(attempt.articleType, attempt.info, domRes.data);
+          noteDiag(channel, {
+            lastError: `неизвестный код: ${codes}`,
+            learned: learned.length ? learned : undefined,
+          });
+          if (learned.length) log(`API: выучил подписи со страницы — ${learned.join("; ")}`);
+          return domRes;
         }
-        return domRead(item);
+        const why = attempt.error || "read-failed";
+        reportChannelFailure(channel, why);
+        return fallbackToDom(item, `чтение деталей: ${why}`);
       }
 
       const phase = ctl.getPhase();
@@ -361,6 +398,7 @@
           );
         }
         // На сверке источником истины всегда остаётся страница.
+        countFallback(cmp.ok ? "контрольная сверка со страницей" : "расхождение со страницей");
         bumpChannelCounter(channel);
         return { snapshot: snapshotFromDomData(domData), path: "dom", data: domData };
       }
@@ -380,6 +418,12 @@
         }
         return out;
       },
+      // Сводка «почему читали страницей»: самые частые причины за прогон.
+      fallbackSummary: () =>
+        [...fallbackReasons.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 4)
+          .map(([reason, count]) => ({ reason, count })),
     };
   }
 

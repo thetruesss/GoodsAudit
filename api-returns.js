@@ -63,20 +63,66 @@
       .trim();
   }
 
+  // Подписи, подсмотренные на самой странице во время прогона: если бэкенд
+  // завёл новый код, мы узнаём его перевод из карточки, прочитанной по DOM,
+  // и дальше этот код обрабатывается быстрым чтением.
+  const learnedStateLabels = {};
+  const learnedSchemaLabels = {};
+
+  function knownStateLabel(key) {
+    if (Object.prototype.hasOwnProperty.call(LOZON_STATE_LABELS, key)) {
+      return LOZON_STATE_LABELS[key];
+    }
+    if (Object.prototype.hasOwnProperty.call(learnedStateLabels, key)) {
+      return learnedStateLabels[key];
+    }
+    return null;
+  }
+
+  function knownSchemaLabel(key) {
+    if (Object.prototype.hasOwnProperty.call(DELIVERY_SCHEMA_LABELS, key)) {
+      return DELIVERY_SCHEMA_LABELS[key];
+    }
+    if (Object.prototype.hasOwnProperty.call(learnedSchemaLabels, key)) {
+      return learnedSchemaLabels[key];
+    }
+    return null;
+  }
+
   function stateLabel(code) {
     const key = String(code ?? "").trim();
     if (!key) return "";
-    return Object.prototype.hasOwnProperty.call(LOZON_STATE_LABELS, key)
-      ? LOZON_STATE_LABELS[key]
-      : "";
+    const label = knownStateLabel(key);
+    return label == null ? "" : label;
   }
 
   function schemaLabel(code) {
     const key = String(code ?? "").trim();
     if (!key) return "";
-    return Object.prototype.hasOwnProperty.call(DELIVERY_SCHEMA_LABELS, key)
-      ? DELIVERY_SCHEMA_LABELS[key]
-      : "";
+    const label = knownSchemaLabel(key);
+    return label == null ? "" : label;
+  }
+
+  // Запоминаем перевод кода, увиденный на странице. Встроенный словарь никогда
+  // не перезаписываем, пустые подписи не запоминаем.
+  function learnStateLabel(code, label) {
+    const key = String(code ?? "").trim();
+    const value = text(label);
+    if (!key || !value) return false;
+    if (Object.prototype.hasOwnProperty.call(LOZON_STATE_LABELS, key)) return false;
+    if (learnedStateLabels[key] === value) return false;
+    learnedStateLabels[key] = value;
+    return true;
+  }
+
+  function learnSchemaLabel(code, label) {
+    const key = String(code ?? "").trim();
+    const value = text(label);
+    if (!key || !value) return false;
+    if (Object.prototype.hasOwnProperty.call(DELIVERY_SCHEMA_LABELS, key)) return false;
+    if (learnedSchemaLabels[key] === value) return false;
+    learnedSchemaLabels[key] = value;
+    return true;
   }
 
   // Неизвестный сервису код статуса — повод не доверять API по этому объекту:
@@ -84,13 +130,13 @@
   function hasUnknownStateCode(code) {
     const key = String(code ?? "").trim();
     if (!key) return false;
-    return !Object.prototype.hasOwnProperty.call(LOZON_STATE_LABELS, key);
+    return knownStateLabel(key) == null;
   }
 
   function hasUnknownSchemaCode(code) {
     const key = String(code ?? "").trim();
     if (!key) return false;
-    return !Object.prototype.hasOwnProperty.call(DELIVERY_SCHEMA_LABELS, key);
+    return knownSchemaLabel(key) == null;
   }
 
   function isSupportedType(articleType) {
@@ -275,35 +321,58 @@
     return typeof value === "number" && Number.isFinite(value) && !Number.isSafeInteger(value);
   }
 
-  // Признак «ответу нельзя доверять по этому объекту»: неизвестный код статуса
-  // (на странице будет подпись, которой у нас нет) или потерявший точность id.
-  // Такой объект дочитываем страницей.
-  function snapshotHasUnknownCodes(articleType, info) {
-    if (!info || typeof info !== "object") return false;
+  // Достаёт из ответа коды, которые влияют на подписи, — чтобы и проверять их,
+  // и уметь доучить перевод по странице.
+  function codesFromInfo(articleType, info) {
+    if (!info || typeof info !== "object") return null;
     const type = String(articleType || "").trim();
     if (type === "posting") {
-      return (
-        hasUnknownStateCode(info.lozonState) ||
-        hasUnknownSchemaCode(info.deliverySchema) ||
-        isUnsafeNumericId(info.lozonId)
-      );
+      return { state: info.lozonState, schema: info.deliverySchema, id: info.lozonId };
     }
     if (type === "exemplar") {
-      return (
-        hasUnknownStateCode(info.lozonExemplarState) ||
-        hasUnknownSchemaCode(info.deliverySchema) ||
-        isUnsafeNumericId(info.exemplarId)
-      );
+      return { state: info.lozonExemplarState, schema: info.deliverySchema, id: info.exemplarId };
     }
     if (type === "boxTransit") {
       const box = info?.info && typeof info.info === "object" ? info.info : info;
-      return (
-        hasUnknownStateCode(box?.statuses?.lozonState) ||
-        hasUnknownSchemaCode(box?.mainInfo?.deliverySchema) ||
-        isUnsafeNumericId(box?.id)
-      );
+      return {
+        state: box?.statuses?.lozonState,
+        schema: box?.mainInfo?.deliverySchema,
+        id: box?.id,
+      };
     }
-    return false;
+    return null;
+  }
+
+  // Перечисляет причины, по которым ответу нельзя доверять по этому объекту:
+  // неизвестный код статуса/схемы (на странице будет подпись, которой у нас
+  // нет) или потерявший точность id. Пустой список — можно доверять.
+  function unknownCodesInInfo(articleType, info) {
+    const codes = codesFromInfo(articleType, info);
+    if (!codes) return [];
+    const out = [];
+    if (hasUnknownStateCode(codes.state)) out.push(`статус «${text(codes.state)}»`);
+    if (hasUnknownSchemaCode(codes.schema)) out.push(`схема доставки «${text(codes.schema)}»`);
+    if (isUnsafeNumericId(codes.id)) out.push(`id вне точности (${codes.id})`);
+    return out;
+  }
+
+  function snapshotHasUnknownCodes(articleType, info) {
+    return unknownCodesInInfo(articleType, info).length > 0;
+  }
+
+  // Доучивание переводов по карточке, прочитанной со страницы: сопоставляем
+  // код из ответа API с подписью, которую показала вёрстка.
+  function learnLabelsFromDom(articleType, info, domData) {
+    const codes = codesFromInfo(articleType, info);
+    if (!codes || !domData || typeof domData !== "object") return [];
+    const learned = [];
+    if (learnStateLabel(codes.state, domData.statusLozon)) {
+      learned.push(`${text(codes.state)} → «${text(domData.statusLozon)}»`);
+    }
+    if (learnSchemaLabel(codes.schema, domData.deliveryScheme)) {
+      learned.push(`${text(codes.schema)} → «${text(domData.deliveryScheme)}»`);
+    }
+    return learned;
   }
 
   return {
@@ -319,6 +388,11 @@
     hasUnknownSchemaCode,
     isUnsafeNumericId,
     snapshotHasUnknownCodes,
+    unknownCodesInInfo,
+    codesFromInfo,
+    learnStateLabel,
+    learnSchemaLabel,
+    learnLabelsFromDom,
     resolveTypeRequest,
     infoRequest,
     contentRequest,

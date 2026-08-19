@@ -2231,8 +2231,10 @@ async function runJobFromState(startPayload) {
           job.readStats = { api: readStats.api, dom: readStats.dom };
           // Диагностика быстрого чтения: попадает в «Результат», чтобы было
           // видно, почему тот или иной тип читается страницей.
-          if (reader) job.apiChannels = reader.snapshot();
-          else if (apiUnavailableReason) {
+          if (reader) {
+            job.apiChannels = reader.snapshot();
+            job.apiFallbacks = reader.fallbackSummary();
+          } else if (apiUnavailableReason) {
             job.apiChannels = { off: { phase: "off", reason: apiUnavailableReason } };
           }
           speedCtl.reportItem({
