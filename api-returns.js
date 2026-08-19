@@ -54,6 +54,27 @@
     delivery: "C2C", // схема delivery отображается как C2C
   };
 
+  // «Статус ALPS» на карточке — тоже код, который вёрстка переводит в подпись
+  // (и у отправления, и у транзитной коробки это один и тот же словарь).
+  const ALPS_STATUS_LABELS = {
+    unknown: "Не определён",
+    new: "Новый",
+    moving: "В пути",
+    waitingForSeller: "Готов к выдаче",
+    waitingForDelivery: "Готов к доставке",
+    completed: "Завершен",
+    utilization: "Утилизируется",
+    utilized: "Утилизирован",
+    cancelled: "Отменен",
+    writtenOff: "Списан",
+    deficitRevealed: "Недостача",
+    repackedIntoRpPosting: "В RP-постинге (устарел)",
+    compensated: "Компенсирован",
+    destroyed: "Расформирован",
+    arrivedForResale: "Прибыл для перепродажи",
+    movingToResale: "В пути для перепродажи",
+  };
+
   const C2C_SCHEMA = "delivery";
 
   function text(value) {
@@ -68,6 +89,7 @@
   // и дальше этот код обрабатывается быстрым чтением.
   const learnedStateLabels = {};
   const learnedSchemaLabels = {};
+  const learnedAlpsLabels = {};
 
   function knownStateLabel(key) {
     if (Object.prototype.hasOwnProperty.call(LOZON_STATE_LABELS, key)) {
@@ -89,11 +111,34 @@
     return null;
   }
 
+  function knownAlpsLabel(key) {
+    if (Object.prototype.hasOwnProperty.call(ALPS_STATUS_LABELS, key)) {
+      return ALPS_STATUS_LABELS[key];
+    }
+    if (Object.prototype.hasOwnProperty.call(learnedAlpsLabels, key)) {
+      return learnedAlpsLabels[key];
+    }
+    return null;
+  }
+
   function stateLabel(code) {
     const key = String(code ?? "").trim();
     if (!key) return "";
     const label = knownStateLabel(key);
     return label == null ? "" : label;
+  }
+
+  function alpsLabel(code) {
+    const key = String(code ?? "").trim();
+    if (!key) return "";
+    const label = knownAlpsLabel(key);
+    return label == null ? "" : label;
+  }
+
+  function hasUnknownAlpsCode(code) {
+    const key = String(code ?? "").trim();
+    if (!key) return false;
+    return knownAlpsLabel(key) == null;
   }
 
   function schemaLabel(code) {
@@ -122,6 +167,16 @@
     if (Object.prototype.hasOwnProperty.call(DELIVERY_SCHEMA_LABELS, key)) return false;
     if (learnedSchemaLabels[key] === value) return false;
     learnedSchemaLabels[key] = value;
+    return true;
+  }
+
+  function learnAlpsLabel(code, label) {
+    const key = String(code ?? "").trim();
+    const value = text(label);
+    if (!key || !value) return false;
+    if (Object.prototype.hasOwnProperty.call(ALPS_STATUS_LABELS, key)) return false;
+    if (learnedAlpsLabels[key] === value) return false;
+    learnedAlpsLabels[key] = value;
     return true;
   }
 
@@ -247,7 +302,8 @@
     snap.formationWarehouse = text(info.formationWarehouseName);
     snap.owner = isC2C ? "" : text(info.contractCustomerName);
     snap.statusLozon = stateLabel(info.lozonState);
-    snap.statusAlps = text(info.alpsStatus);
+    // «Статус ALPS» страница показывает только у непустого кода и тоже подписью.
+    snap.statusAlps = alpsLabel(info.alpsStatus);
     snap.status = stateLabel(info.lozonState); // первый бейдж в шапке карточки
     snap.isC2C = isC2C;
     return snap;
@@ -269,7 +325,7 @@
     snap.formationWarehouse = text(info.formationWarehouseName);
     snap.owner = isC2C ? "" : text(info.contractCustomerName);
     snap.statusLozon = stateLabel(info.lozonExemplarState);
-    snap.statusAlps = text(info.alpsStatus);
+    snap.statusAlps = alpsLabel(info.alpsStatus);
     snap.status = stateLabel(info.lozonExemplarState);
     snap.isC2C = isC2C;
     return snap;
@@ -294,8 +350,9 @@
     // «Собственник» рисуется только когда у продавца есть id.
     snap.owner = main.sellerInfo?.id ? text(main.sellerInfo?.name) : "";
     snap.statusLozon = stateLabel(statuses.lozonState);
+    // У коробки в «Статус ALPS» идёт returnStatus, и при unknown поле скрыто.
     const returnStatus = text(statuses.returnStatus);
-    snap.statusAlps = returnStatus && returnStatus !== "unknown" ? returnStatus : "";
+    snap.statusAlps = returnStatus && returnStatus !== "unknown" ? alpsLabel(returnStatus) : "";
     snap.status = stateLabel(statuses.lozonState);
     snap.isTransitBox = true;
     snap.isC2C = schema === C2C_SCHEMA;
@@ -327,16 +384,27 @@
     if (!info || typeof info !== "object") return null;
     const type = String(articleType || "").trim();
     if (type === "posting") {
-      return { state: info.lozonState, schema: info.deliverySchema, id: info.lozonId };
+      return {
+        state: info.lozonState,
+        schema: info.deliverySchema,
+        alps: info.alpsStatus,
+        id: info.lozonId,
+      };
     }
     if (type === "exemplar") {
-      return { state: info.lozonExemplarState, schema: info.deliverySchema, id: info.exemplarId };
+      return {
+        state: info.lozonExemplarState,
+        schema: info.deliverySchema,
+        alps: info.alpsStatus,
+        id: info.exemplarId,
+      };
     }
     if (type === "boxTransit") {
       const box = info?.info && typeof info.info === "object" ? info.info : info;
       return {
         state: box?.statuses?.lozonState,
         schema: box?.mainInfo?.deliverySchema,
+        alps: box?.statuses?.returnStatus,
         id: box?.id,
       };
     }
@@ -352,6 +420,7 @@
     const out = [];
     if (hasUnknownStateCode(codes.state)) out.push(`статус «${text(codes.state)}»`);
     if (hasUnknownSchemaCode(codes.schema)) out.push(`схема доставки «${text(codes.schema)}»`);
+    if (hasUnknownAlpsCode(codes.alps)) out.push(`статус ALPS «${text(codes.alps)}»`);
     if (isUnsafeNumericId(codes.id)) out.push(`id вне точности (${codes.id})`);
     return out;
   }
@@ -372,6 +441,9 @@
     if (learnSchemaLabel(codes.schema, domData.deliveryScheme)) {
       learned.push(`${text(codes.schema)} → «${text(domData.deliveryScheme)}»`);
     }
+    if (learnAlpsLabel(codes.alps, domData.statusAlps)) {
+      learned.push(`${text(codes.alps)} → «${text(domData.statusAlps)}»`);
+    }
     return learned;
   }
 
@@ -380,12 +452,16 @@
     SUPPORTED_TYPES,
     LOZON_STATE_LABELS,
     DELIVERY_SCHEMA_LABELS,
+    ALPS_STATUS_LABELS,
     C2C_SCHEMA,
     isSupportedType,
     stateLabel,
     schemaLabel,
+    alpsLabel,
     hasUnknownStateCode,
     hasUnknownSchemaCode,
+    hasUnknownAlpsCode,
+    learnAlpsLabel,
     isUnsafeNumericId,
     snapshotHasUnknownCodes,
     unknownCodesInInfo,

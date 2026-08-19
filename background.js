@@ -1978,6 +1978,15 @@ async function runJobFromState(startPayload) {
       ? globalThis.__gaApiMapping.createRequestPacer(apiPrefs.rps)
       : null;
   const readStats = { api: 0, dom: 0 };
+  // Состояние быстрого чтения общее на все потоки: типы проверяются один раз
+  // на прогон, а не в каждом окне заново, и статистика не перезаписывается.
+  const apiShared = {
+    sharedChannels: new Map(),
+    sharedCounters: new Map(),
+    sharedDiagnostics: new Map(),
+    sharedFallbacks: new Map(),
+    sharedTypeCache: new Map(),
+  };
   const apiUnavailableReason = !apiPrefs.enabled
     ? "выключено в настройках"
     : !globalThis.__gaApiReader
@@ -2140,6 +2149,7 @@ async function runJobFromState(startPayload) {
           ? globalThis.__gaApiReader.createHubApiReader(readerDeps, {
               opsWarehouses: Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob,
               verifyEveryN: 25,
+              ...apiShared,
             })
           : null;
 

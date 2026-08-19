@@ -380,6 +380,43 @@ test("фильтр опер. складов: чужой склад пустее�
   assert.strictEqual(r.data.operationalWarehouseSeen, true, "склад на карточке был");
 });
 
+test("общее состояние: второй поток не пробуется заново и статистика общая", async () => {
+  const ids = ["501883634205700", "501883634205701", "501883634205702", "501883634205703"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  const shared = {
+    sharedChannels: new Map(),
+    sharedCounters: new Map(),
+    sharedDiagnostics: new Map(),
+    sharedFallbacks: new Map(),
+    sharedTypeCache: new Map(),
+  };
+  const a = makeDriver({ infos, contents });
+  const b = makeDriver({ infos, contents });
+  const readerA = R.createHubApiReader(a.deps, { verifyEveryN: 0, ...shared });
+  const readerB = R.createHubApiReader(b.deps, { verifyEveryN: 0, ...shared });
+
+  // Первый поток проходит обе пробы...
+  await readerA.read({ articleId: ids[0] });
+  await readerA.read({ articleId: ids[1] });
+  assert.strictEqual(readerA.getPhase("posting"), "on");
+  // ...а второй сразу читает через API, не открывая страницу заново.
+  assert.strictEqual(readerB.getPhase("posting"), "on", "состояние общее");
+  const domBefore = b.state.domCalls;
+  const r = await readerB.read({ articleId: ids[2] });
+  assert.strictEqual(r.path, "api");
+  assert.strictEqual(b.state.domCalls, domBefore, "второй поток не пробуется заново");
+
+  // Статистика причин тоже общая, а не перезаписывается.
+  const summary = readerB.fallbackSummary();
+  const total = summary.reduce((acc, x) => acc + x.count, 0);
+  assert.strictEqual(total, 2, "учтены пробы обоих потоков: " + JSON.stringify(summary));
+});
+
 test("ни один уход на страницу не остаётся без причины", async () => {
   const ids = ["501883634205500", "501883634205501", "501883634205502"];
   const infos = {};
