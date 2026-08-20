@@ -273,4 +273,18 @@ test("битые ответы не роняют маппер", () => {
   assert.strictEqual(partial.statusLozon, "");
 });
 
+test("коробка, которую профиль не показывает: конверт isSupported=false", () => {
+  const snap = RT.mapTransitBox({ info: null, isSupported: false }, { exemplars: [] });
+  assert.strictEqual(snap.unsupportedTransitBox, true, "как информер на странице");
+  assert.strictEqual(snap.nomenclature, "");
+  assert.strictEqual(snap.operationalWarehouseSeen, false);
+  assert.strictEqual(RT.payloadSaysUnsupported("boxTransit", { info: null, isSupported: false }), true);
+  assert.strictEqual(
+    RT.payloadSaysUnsupported("boxTransit", { info: { id: 1 }, isSupported: true }),
+    false
+  );
+  // У отправления конверта нет — ответ приходит объектом, и трогать его нельзя.
+  assert.strictEqual(RT.payloadSaysUnsupported("posting", { lozonId: 1 }), false);
+});
+
 module.exports = { tests };
