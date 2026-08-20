@@ -144,7 +144,11 @@ test("boxTransit: маппинг транзитной коробки", () => {
   assert.strictEqual(snap.articleId, "851348957478000");
   assert.strictEqual(snap.shipment, "RI-99887766", "приоритет returnInventoryId");
   assert.strictEqual(snap.price, 42000);
-  assert.strictEqual(snap.nomenclature, "Телевизор LG 55");
+  assert.strictEqual(
+    snap.nomenclature,
+    "",
+    "в «Номенклатуре» страница пишет саму коробку — подпись ставит нормализация"
+  );
   assert.strictEqual(snap.operationalWarehouse, "МО_ИСТРА_ХАБ");
   assert.strictEqual(snap.formationWarehouse, "СЦ Софьино");
   assert.strictEqual(snap.owner, "ООО Селлер");
@@ -256,8 +260,9 @@ test("построение запросов: адреса ручек и пара
     "/p-api/alps-api/v1/ArticleProfile/Posting/posting-content/501883634205000"
   );
   assert.strictEqual(
-    RT.contentRequest("boxTransit", "8").url,
-    "/p-api/alps-api/v1/ArticleProfile/TransitBox/content/8"
+    RT.contentRequest("boxTransit", "8"),
+    null,
+    "у коробки в номенклатуре сама коробка — состав не запрашиваем"
   );
   assert.strictEqual(RT.contentRequest("exemplar", "7"), null, "у экземпляра состав не нужен");
 });
