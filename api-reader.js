@@ -22,7 +22,13 @@
   root.__gaApiReader = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function (M, RT) {
   const DEFAULTS = {
-    verifyEveryN: 25, // как часто в режиме on контрольно сверять API с DOM
+    verifyEveryN: 25, // первый шаг контрольной сверки API с DOM в режиме on
+    // Дальше шаг растёт вдвое до этого потолка. Сверка — полная загрузка
+    // страницы, и на тысячах объектов «каждый 25-й» съедает весь выигрыш,
+    // хотя сотня совпадений подряд уже сказала всё, что могла.
+    maxVerifyEveryN: 200,
+    // Сколько ждать чужую пробу, прежде чем делать свою (мс).
+    probeWaitMs: 30000,
     // Одной сверки достаточно: совпасть должны все непустые поля карточки
     // (цена, номенклатура, номер, id, склад, три статуса, схема) — случайно
     // такое не совпадает. Каждая лишняя проба стоит полной загрузки страницы.
@@ -34,6 +40,31 @@
   };
 
   const UNSUPPORTED_CHANNEL = "unsupported";
+
+  // Номера прочитанного, на которых делаем контрольную сверку: base, потом шаг
+  // удваивается до потолка (25, 75, 175, 375, 775, 1575, дальше каждые cap).
+  // Функция чистая — считает по общему на все потоки номеру объекта, поэтому
+  // своего состояния не держит и на потоки делиться не может.
+  function isAuditIndex(seen, base, cap) {
+    const first = Number(base) || 0;
+    if (!(first > 0) || !(seen > 0)) return false; // 0 — периодическая сверка выключена
+    const top = Math.max(first, Number(cap) || first);
+    let at = first;
+    let step = first;
+    while (at < seen && step < top) {
+      step = Math.min(step * 2, top);
+      at += step;
+    }
+    if (at >= seen) return at === seen;
+    return (seen - at) % top === 0;
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => {
+      const t = setTimeout(resolve, Math.max(0, Number(ms) || 0));
+      if (t && typeof t.unref === "function") t.unref();
+    });
+  }
 
   function snapshotFromDomData(data) {
     // DOM-скрейпер возвращает уже готовый снапшот; берём поля как есть.
@@ -79,8 +110,28 @@
       channelCounters.set(key, next);
       return next;
     }
-    function channelCounter(name) {
-      return channelCounters.get(String(name || "unknown")) || 0;
+    // Проба стоит полной загрузки страницы, поэтому по каналу она должна быть
+    // одна: потоки, зашедшие в тот же момент, ждут её результата, а не
+    // повторяют её каждый у себя. Иначе в начале прогона страниц открывается
+    // ровно столько, сколько потоков, — и весь выигрыш съедается на старте.
+    const probeLocks = opts.sharedProbeLocks instanceof Map ? opts.sharedProbeLocks : new Map();
+    async function waitForRunningProbe(name) {
+      const inFlight = probeLocks.get(String(name || "unknown"));
+      if (!inFlight) return;
+      // Ждём не бесконечно: если чужая проба зависла, читаем сами.
+      await Promise.race([inFlight, delay(opts.probeWaitMs)]);
+    }
+    function startProbeLock(name) {
+      const key = String(name || "unknown");
+      let release = function () {};
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      probeLocks.set(key, gate);
+      return function () {
+        if (probeLocks.get(key) === gate) probeLocks.delete(key);
+        release();
+      };
     }
     // Диагностика: почему по типу не включилось быстрое чтение. Показывается
     // пользователю, поэтому храним и сами расходящиеся значения (усечённо).
@@ -384,67 +435,93 @@
         return fallbackToDom(item, `чтение деталей: ${why}`);
       }
 
-      const phase = ctl.getPhase();
-      const opsResolved = await resolveOpsWithCarriage(
-        resolved.articleType,
-        resolved.articleId,
-        attempt.snapshot
-      );
-      const apiData = toDomShape(attempt.snapshot, item, opsResolved);
-
-      // Канал ещё не подтверждён либо пришло время контрольной сверки —
-      // читаем то же самое страницей и сравниваем поле в поле.
-      const seenInChannel = channelCounter(channel);
-      const needVerify =
-        phase === "probe" ||
-        (opts.verifyEveryN > 0 && seenInChannel > 0 && seenInChannel % opts.verifyEveryN === 0);
-
-      if (needVerify) {
-        const domData = await deps.domScrape(item);
-        await refreshAuthFromPage();
-        const cmp = compareWithDom(apiData, domData, channel);
-        if (cmp.ok) {
-          if (phase === "probe") {
-            const next = ctl.probeSuccess();
-            if (next === "on") {
-              log(
-                `API: включаю быстрое чтение для типа «${channel}» ` +
-                  `(заголовки: ${Object.keys(authHeaders).join(", ") || "нет"})`
-              );
-            }
-          } else {
-            ctl.batchOk();
-          }
-        } else {
-          if (phase === "probe") {
-            ctl.probeFail("verify:" + cmp.mismatches.join(","));
-          } else {
-            ctl.miscompare();
-          }
-          // Запоминаем сами расходящиеся значения — по ним сразу видно,
-          // где маппинг разошёлся с вёрсткой.
-          const domSnap = snapshotFromDomData(domData);
-          const samples = cmp.mismatches.slice(0, 4).map((field) => ({
-            field,
-            api: shortValue(apiData?.[field]),
-            dom: shortValue(domSnap?.[field]),
-          }));
-          noteDiag(channel, { mismatches: cmp.mismatches.slice(0, 8), samples });
-          log(
-            `API: расхождение со страницей по типу «${channel}» ` +
-              `(${cmp.mismatches.join(",")}) — беру данные страницы` +
-              (ctl.getPhase() === "off" ? ", тип отключён" : "")
-          );
+      // Пока канал не подтверждён, пробу делает кто-то один — остальные ждут
+      // её исхода и идут уже по готовому решению.
+      let phase = ctl.getPhase();
+      let releaseProbe = null;
+      if (phase === "probe") {
+        // Чужая проба уже идёт — ждём её исход вместо своей такой же. Ждём
+        // ограниченное число раз: если проба зависла, пробуем сами, а не стоим.
+        for (let waits = 0; waits < 2 && phase === "probe" && probeLocks.has(channel); waits++) {
+          await waitForRunningProbe(channel);
+          phase = ctl.getPhase();
         }
-        // На сверке источником истины всегда остаётся страница.
-        countFallback(cmp.ok ? "контрольная сверка со страницей" : "расхождение со страницей");
-        bumpChannelCounter(channel);
-        return { snapshot: snapshotFromDomData(domData), path: "dom", data: domData };
+        if (phase === "off") {
+          return fallbackToDom(item, `тип «${channel}» отключён`);
+        }
+        // Проверка слота и его захват идут подряд, без await между ними, иначе
+        // два потока успеют оба решить, что пробу делают они.
+        if (phase === "probe") releaseProbe = startProbeLock(channel);
       }
 
-      ctl.batchOk();
-      bumpChannelCounter(channel);
-      return { snapshot: apiData, path: "api", data: apiData, articleType: attempt.articleType };
+      try {
+        const opsResolved = await resolveOpsWithCarriage(
+          resolved.articleType,
+          resolved.articleId,
+          attempt.snapshot
+        );
+        const apiData = toDomShape(attempt.snapshot, item, opsResolved);
+
+        // Номер объекта в канале берём сразу с увеличением счётчика: если
+        // сначала прочитать, а увеличить потом, то все потоки, вошедшие на
+        // одном и том же номере, назначат сверку каждый себе — вместо одной
+        // страницы открывается столько, сколько потоков.
+        const seenInChannel = bumpChannelCounter(channel);
+        const needVerify =
+          phase === "probe" ||
+          isAuditIndex(seenInChannel, opts.verifyEveryN, opts.maxVerifyEveryN);
+
+        if (needVerify) return await verifyAgainstDom(item, channel, phase, apiData);
+
+        ctl.batchOk();
+        return { snapshot: apiData, path: "api", data: apiData, articleType: attempt.articleType };
+      } finally {
+        if (releaseProbe) releaseProbe();
+      }
+    }
+
+    // Читает тот же объект страницей и сравнивает поле в поле. На сверке
+    // источником истины всегда остаётся страница.
+    async function verifyAgainstDom(item, channel, phase, apiData) {
+      const ctl = channelFor(channel);
+      const domData = await deps.domScrape(item);
+      await refreshAuthFromPage();
+      const cmp = compareWithDom(apiData, domData, channel);
+      if (cmp.ok) {
+        if (phase === "probe") {
+          const next = ctl.probeSuccess();
+          if (next === "on") {
+            log(
+              `API: включаю быстрое чтение для типа «${channel}» ` +
+                `(заголовки: ${Object.keys(authHeaders).join(", ") || "нет"})`
+            );
+          }
+        } else {
+          ctl.batchOk();
+        }
+      } else {
+        if (phase === "probe") {
+          ctl.probeFail("verify:" + cmp.mismatches.join(","));
+        } else {
+          ctl.miscompare();
+        }
+        // Запоминаем сами расходящиеся значения — по ним сразу видно,
+        // где маппинг разошёлся с вёрсткой.
+        const domSnap = snapshotFromDomData(domData);
+        const samples = cmp.mismatches.slice(0, 4).map((field) => ({
+          field,
+          api: shortValue(apiData?.[field]),
+          dom: shortValue(domSnap?.[field]),
+        }));
+        noteDiag(channel, { mismatches: cmp.mismatches.slice(0, 8), samples });
+        log(
+          `API: расхождение со страницей по типу «${channel}» ` +
+            `(${cmp.mismatches.join(",")}) — беру данные страницы` +
+            (ctl.getPhase() === "off" ? ", тип отключён" : "")
+        );
+      }
+      countFallback(cmp.ok ? "контрольная сверка со страницей" : "расхождение со страницей");
+      return { snapshot: snapshotFromDomData(domData), path: "dom", data: domData };
     }
 
     return {

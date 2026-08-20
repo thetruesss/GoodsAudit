@@ -1986,6 +1986,8 @@ async function runJobFromState(startPayload) {
     sharedDiagnostics: new Map(),
     sharedFallbacks: new Map(),
     sharedTypeCache: new Map(),
+    // Пробу по типу делает один поток, остальные ждут её исхода.
+    sharedProbeLocks: new Map(),
   };
   const apiUnavailableReason = !apiPrefs.enabled
     ? "выключено в настройках"

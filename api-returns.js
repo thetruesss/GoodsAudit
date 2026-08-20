@@ -7,7 +7,7 @@
 //   ArticleProfile/ArticleResolver/get-article-type?article={номер или id}
 //   ArticleProfile/Posting/info?id={id}      + Posting/posting-content/{id}
 //   ArticleProfile/Exemplar/info?id={id}
-//   ArticleProfile/TransitBox/info?id={id}   + TransitBox/content/{id}
+//   ArticleProfile/TransitBox/info?id={id}
 (function (root, factory) {
   const api = factory();
   if (typeof module !== "undefined" && module.exports) module.exports = api;
@@ -253,10 +253,10 @@
     switch (String(articleType || "").trim()) {
       case "posting":
         return { method: "GET", url: `${API_BASE}/Posting/posting-content/${id}` };
-      case "boxTransit":
-        return { method: "GET", url: `${API_BASE}/TransitBox/content/${id}` };
       default:
-        return null; // у экземпляра номенклатура прямо в info
+        // У экземпляра номенклатура прямо в info, у транзитной коробки страница
+        // пишет саму коробку — состав для неё не нужен, и запрос лишний.
+        return null;
     }
   }
 
@@ -366,7 +366,12 @@
     snap.articleId = text(box.id);
     snap.shipment = text(main.returnInventoryId) || text(main.containerName);
     snap.price = priceValue(main.price);
-    snap.nomenclature = firstNomenclature(content);
+    // Номенклатуру у коробки не подставляем: на карточке в этой колонке стоит
+    // сама коробка, а не то, что внутри. Живой прогон это подтвердил — страница
+    // отдавала «Транзитная коробка» там, где мы брали название товара из
+    // состава. Подпись ставит общая нормализация по isTransitBox — та же, что
+    // и на чтении страницей, поэтому строка живёт в одном месте.
+    snap.nomenclature = "";
     snap.operationalWarehouse = text(places.currentPlace?.name);
     snap.operationalWarehouseSeen = Boolean(text(places.currentPlace?.name));
     snap.deliveryScheme = schemaLabel(schema);

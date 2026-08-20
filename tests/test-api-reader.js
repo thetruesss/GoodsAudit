@@ -102,6 +102,9 @@ function makeDriver(opts = {}) {
   const deps = {
     domScrape: async (item) => {
       state.domCalls += 1;
+      // Загрузка страницы — самая долгая операция; в тестах на многопоточность
+      // это позволяет запросам действительно пересечься во времени.
+      if (opts.domDelayMs) await new Promise((r) => setTimeout(r, opts.domDelayMs));
       const id = String(item.articleId);
       const raw = apiSnapshotFor(id);
       let ops = M.resolveOpsWarehouse(raw.operationalWarehouse, state.opsWarehouses);
@@ -623,6 +626,107 @@ test("неизвестный код статуса → объект читает
   assert.strictEqual(r.path, "dom", "неизвестный код → страница");
   assert.strictEqual(state.domCalls, before + 1);
   assert.strictEqual(reader.getPhase("posting"), "on", "тип остаётся включённым");
+});
+
+// --- многопоточность: страница не должна открываться по разу на каждый поток --
+
+function postingBatch(prefix, count) {
+  const ids = [];
+  const infos = {};
+  const contents = {};
+  for (let i = 1; i <= count; i++) {
+    const id = prefix + String(i).padStart(2, "0");
+    ids.push(id);
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  }
+  return { ids, infos, contents };
+}
+
+test("стартовая проба одна на тип, сколько бы потоков ни зашло разом", async () => {
+  const { ids, infos, contents } = postingBatch("5018836342070", 5);
+  const { state, deps } = makeDriver({ infos, contents, domDelayMs: 5 });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+
+  // Все потоки стартуют одновременно и видят тип ещё непроверенным.
+  const results = await Promise.all(ids.map((id) => reader.read({ articleId: id })));
+
+  assert.strictEqual(state.domCalls, 1, "страницу открыл только тот, кто взял пробу");
+  assert.strictEqual(reader.getPhase("posting"), "on");
+  const viaApi = results.filter((r) => r.path === "api").length;
+  assert.strictEqual(viaApi, ids.length - 1, "остальные дождались пробы и пошли через API");
+});
+
+test("контрольную сверку назначает себе один поток, а не все сразу", async () => {
+  const { ids, infos, contents } = postingBatch("5018836342080", 9);
+  const { state, deps } = makeDriver({ infos, contents, domDelayMs: 5 });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 3 });
+
+  // Проба + два объекта: счётчик канала доходит до 3 — как раз до сверки.
+  await reader.read({ articleId: ids[0] });
+  await reader.read({ articleId: ids[1] });
+  await reader.read({ articleId: ids[2] });
+  assert.strictEqual(reader.getPhase("posting"), "on");
+
+  // Шесть потоков заходят в один момент. Номера 4..9 разберутся без пересечений,
+  // и сверка достанется ровно одному — тому, кому выпал девятый.
+  const before = state.domCalls;
+  await Promise.all(ids.slice(3).map((id) => reader.read({ articleId: id })));
+  assert.strictEqual(
+    state.domCalls - before,
+    1,
+    "одна сверка на шесть потоков, а не по одной на каждый"
+  );
+});
+
+test("шаг контрольной сверки растёт: сначала часто, дальше реже", async () => {
+  const { ids, infos, contents } = postingBatch("5018836342090", 30);
+  const { state, deps } = makeDriver({ infos, contents });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 2, maxVerifyEveryN: 8 });
+
+  const domAt = [];
+  for (let i = 0; i < ids.length; i++) {
+    const before = state.domCalls;
+    await reader.read({ articleId: ids[i] });
+    if (state.domCalls > before) domAt.push(i + 1);
+  }
+  // 1 — стартовая проба, дальше шаг 2, 4, 8, 8, 8 (потолок).
+  assert.deepStrictEqual(domAt, [1, 2, 6, 14, 22, 30]);
+});
+
+test("транзитная коробка: номенклатура как на странице, состав не запрашиваем", async () => {
+  const id = "851348957478001";
+  const { state, deps } = makeDriver({
+    types: { [id]: "boxTransit" },
+    infos: {
+      [id]: {
+        id: Number(id),
+        mainInfo: {
+          returnInventoryId: "RI-42",
+          deliverySchema: "fbo",
+          price: { value: 12000, currency: "RUB" },
+          sellerInfo: { id: 7, name: "ООО Селлер" },
+        },
+        placeInfo: { currentPlace: { name: "МО_ИСТРА_ХАБ" }, sourcePlace: { name: "СЦ Софьино" } },
+        statuses: { lozonState: "banded", returnStatus: "utilization" },
+      },
+    },
+    // Состав у коробки есть, но страница показывает не его.
+    contents: { [id]: { exemplars: [{ modelName: "Шкаф для одежды распашной 2113" }] } },
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+
+  const probe = await reader.read({ articleId: id });
+  assert.strictEqual(probe.data.nomenclature, "Транзитная коробка");
+  assert.strictEqual(
+    reader.getPhase("boxTransit"),
+    "on",
+    "сверка со страницей сходится — тип включается"
+  );
+  assert.ok(
+    !state.urls.some((u) => u.includes("/content/")),
+    "лишнего запроса состава коробки нет"
+  );
 });
 
 module.exports = { tests };
