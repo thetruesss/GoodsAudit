@@ -635,7 +635,10 @@ async function waitUntilArticlePage(
 }
 
 // --- API-чтение: браузерные примитивы для api-reader.js ---------------------
-const API_READ_DEFAULT_RPS = 25;
+// Потолок запросов в секунду на весь прогон. Объекту нужно 3-4 запроса
+// (тип, карточка, состав, иногда перевозка), так что это и есть реальный
+// предел скорости: 40 rps ≈ 11 объектов в секунду.
+const API_READ_DEFAULT_RPS = 40;
 const ARTICLE_ORIGIN = "https://returns.o3t.ru";
 
 async function getApiReadPrefs() {
@@ -918,10 +921,13 @@ async function scrapeArticleOnTab(
     if (perf) perf.msNavigate = (perf.msNavigate || 0) + (Date.now() - tNav);
 
     await waitIfPaused();
-    const tSettle = Date.now();
-    await sleep(resolveSettleMs() + cycle * 100);
-    if (perf) perf.msSettle = (perf.msSettle || 0) + (Date.now() - tSettle);
-    await waitIfPaused();
+    // Страница готова, когда на ней появились данные, а не когда истекла
+    // фиксированная пауза. Замеры это показали в лоб: сама страница грузилась
+    // ~270 мс, маркеры приходили следом почти мгновенно, а мы поверх этого
+    // спали ещё ~900 мс — три четверти всего времени чтения уходило в пустую
+    // паузу. Ждём маркеры и читаем сразу; неполный снапшот всё равно
+    // перечитывается циклом ниже, и авто-скорость поднимет паузу, если начнёт
+    // промахиваться.
     const tMarkers = Date.now();
     const markersFound = await waitForDataMarkers(
       tabId,
@@ -935,6 +941,14 @@ async function scrapeArticleOnTab(
       perf.markersFound = (perf.markersFound !== false) && markersFound;
     }
     await waitIfPaused();
+    // Пауза остаётся только для случая, когда данных на странице так и нет:
+    // либо она ещё рисуется, либо это редкий макет без наших маркеров.
+    if (!markersFound) {
+      const tSettle = Date.now();
+      await sleep(resolveSettleMs() + cycle * 100);
+      if (perf) perf.msSettle = (perf.msSettle || 0) + (Date.now() - tSettle);
+      await waitIfPaused();
+    }
     const tInject = Date.now();
     await execScriptFiles(tabId, ["page-scrape.js"]);
     if (perf) perf.msInject = (perf.msInject || 0) + (Date.now() - tInject);
@@ -1524,6 +1538,22 @@ function isTrustedExtensionSender(sender) {
   return url.startsWith(chrome.runtime.getURL(""));
 }
 
+// Сколько вкладок держим под чтение страниц, когда быстрое чтение работает.
+// Через API вкладка нужна только чтобы выполнить fetch в контексте страницы —
+// навигации там нет, поэтому одной сессионной вкладки хватает на любое число
+// одновременных чтений. Страница остаётся нужна лишь на пробах, сверках и
+// фолбэках, а их после включения типа единицы.
+const API_MODE_PAGE_TABS = 2;
+
+// Пул вкладок живёт в api-mapping.js — там он покрыт тестами. Без него
+// прогон невозможен, поэтому падаем понятно, а не «undefined is not a
+// function» где-то в середине.
+const createTabPool =
+  globalThis.__gaApiMapping?.createTabPool ||
+  (() => {
+    throw new Error("Не загрузился api-mapping.js — пул вкладок недоступен");
+  });
+
 async function openWorkerWindow(threadCount, mode = "file", aggressiveMode = false) {
   const n = Math.max(1, Math.min(MANUAL_THREADS_HARD_CAP, Math.floor(Number(threadCount) || 1)));
   const bringToFront = Boolean(aggressiveMode);
@@ -2053,7 +2083,20 @@ async function runJobFromState(startPayload) {
       return;
     }
 
-    const { tabIds } = await openWorkerWindow(threads, mode, runConfig.aggressiveMode);
+    // Быстрое чтение развязано со вкладками: запросы к API выполняются в
+    // контексте одной сессионной вкладки (навигации там нет, поэтому она
+    // обслуживает любое число одновременных чтений), а страницы читает
+    // маленький пул. «Потоки» с этого момента — параллельность чтения, а не
+    // число окон: вкладок 1 + 2 вместо «вкладка на поток».
+    const apiReadReady = apiPrefs.enabled && Boolean(globalThis.__gaApiReader);
+    const pageTabsAtStart = apiReadReady ? Math.min(API_MODE_PAGE_TABS, threads) : threads;
+    const { tabIds } = await openWorkerWindow(
+      apiReadReady ? pageTabsAtStart + 1 : threads,
+      mode,
+      runConfig.aggressiveMode
+    );
+    const sessionTabId = apiReadReady ? tabIds[0] : null;
+    const pagePool = createTabPool(apiReadReady ? tabIds.slice(1) : tabIds.slice());
     const ITEM_HARD_TIMEOUT_MS = 60 * 60 * 1000;
 
     let nextAssign = 0;
@@ -2078,6 +2121,7 @@ async function runJobFromState(startPayload) {
       await forceTabPerformanceMode(nextTabId).catch(() => {});
       const idx = tabIds.indexOf(tabId);
       if (idx >= 0) tabIds[idx] = nextTabId;
+      pagePool.replace(tabId, nextTabId);
       if (state.boostTimerId != null) {
         startWorkerBoost(mode, winId, tabIds, runConfig.aggressiveMode);
       }
@@ -2089,20 +2133,76 @@ async function runJobFromState(startPayload) {
 
     const totalWorkItems = plannedTotal > 0 ? plannedTotal : toFetch.length;
 
-    async function workerLoop(tabId, workerIndex) {
-      let workerTabId = tabId;
-      await sleep(Math.min(2000, workerIndex * 140));
+    // perf принадлежит объекту, а не потоку, но класть его в сам item нельзя:
+    // toFetch уезжает в storage вместе с задачей.
+    const perfByItem = new WeakMap();
+    const jobOpsList = () =>
+      Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob;
 
-      // Контекст текущего объекта, чтобы инъектируемые в reader примитивы
-      // всегда видели актуальную вкладку, perf и обрабатываемый item.
-      const ctx = { perf: null, item: null };
-      const relearnTokenForWorker = async () => {
-        const it = ctx.item;
-        if (!it) return;
-        const url = `${BASE}${encodeURIComponent(it.articleId)}`;
+    // Последняя вкладка, на которой действительно грузилась страница: свежие
+    // токены появляются именно там, поэтому снимаем заголовки и с неё тоже.
+    let lastPageTabId = null;
+
+    // Сессионную вкладку браузер может выгрузить — тогда запросы из неё не
+    // уйдут. Проверяем не на каждый запрос, а раз в несколько секунд.
+    let sessionTabCheckedAt = 0;
+    async function ensureSessionTabAlive() {
+      if (sessionTabId == null) return;
+      const now = Date.now();
+      if (now - sessionTabCheckedAt < 5000) return;
+      sessionTabCheckedAt = now;
+      await ensureTabNotDiscarded(sessionTabId).catch(() => {});
+    }
+
+    async function domScrapeViaPool(it) {
+      let tabId = await pagePool.acquire();
+      lastPageTabId = tabId;
+      try {
+        await ensureTabNotDiscarded(tabId).catch(() => {});
+        if (runConfig.aggressiveMode) {
+          await bringWorkerTabToFront(state.workerWindowId, tabId).catch(() => {});
+        }
+        return await withTimeout(
+          scrapeArticleOnTab(
+            tabId,
+            it.articleId,
+            () => speedCtl.getSettleMs(),
+            jobOpsList(),
+            it.shipmentSource || "",
+            () => state.abortRequested,
+            () => state.pauseRequested,
+            perfByItem.get(it) || null
+          ),
+          ITEM_HARD_TIMEOUT_MS,
+          `Таймаут обработки в потоке (${Math.round(ITEM_HARD_TIMEOUT_MS / 1000)}с)`
+        );
+      } catch (e) {
+        // Зависшую вкладку меняем на свежую — иначе она отравит весь пул.
+        if (String(e?.message || e).includes("Таймаут обработки в потоке")) {
+          try {
+            tabId = await respawnWorkerTab(tabId);
+          } catch {}
+        }
+        throw e;
+      } finally {
+        pagePool.release(tabId);
+      }
+    }
+
+    // Переучивание токена общее: сессионную вкладку незачем гонять по кругу
+    // каждым потоком, одного перехода хватает всем.
+    let relearnInFlight = null;
+    let relearnHintId = "";
+    async function relearnTokenShared() {
+      if (relearnInFlight) return relearnInFlight;
+      const articleId = relearnHintId;
+      const navTabId = sessionTabId;
+      if (!articleId || navTabId == null) return;
+      relearnInFlight = (async () => {
+        const url = `${BASE}${encodeURIComponent(articleId)}`;
         try {
           await new Promise((resolve, reject) => {
-            chrome.tabs.update(workerTabId, { url }, () => {
+            chrome.tabs.update(navTabId, { url }, () => {
               if (chrome.runtime.lastError) {
                 reject(new Error(chrome.runtime.lastError.message));
                 return;
@@ -2111,59 +2211,96 @@ async function runJobFromState(startPayload) {
             });
           });
           await waitUntilArticlePage(
-            workerTabId,
-            it.articleId,
+            navTabId,
+            articleId,
             PAGE_LOAD_TIMEOUT_MS,
             () => state.abortRequested,
             () => state.pauseRequested
           );
-          await sleep(300);
           await waitForDataMarkers(
-            workerTabId,
+            navTabId,
             MARKER_WAIT_MS,
             () => state.abortRequested,
             () => state.pauseRequested
           );
         } catch (e) {}
-      };
-      const readerDeps = {
-        domScrape: (it) =>
-          withTimeout(
-            scrapeArticleOnTab(
-              workerTabId,
-              it.articleId,
-              () => speedCtl.getSettleMs(),
-              Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob,
-              it.shipmentSource || "",
-              () => state.abortRequested,
-              () => state.pauseRequested,
-              ctx.perf
-            ),
-            ITEM_HARD_TIMEOUT_MS,
-            `Таймаут обработки в потоке (${Math.round(ITEM_HARD_TIMEOUT_MS / 1000)}с)`
-          ),
-        captureAndClear: () => captureAndClearOnTab(workerTabId),
-        replay: async (req, headers) => {
-          if (requestPacer) await requestPacer.take(1);
-          return replayApiOnTab(workerTabId, req, headers);
-        },
-        normalize: (rawSnapshot, it) =>
-          normalizeArticleSnapshot(rawSnapshot, it?.articleId, it?.shipmentSource || ""),
-        relearnToken: relearnTokenForWorker,
-        isOnHubDomain: () => isTabOnArticleOrigin(workerTabId),
-        log: (m) => {
-          logApi(m);
-          if (!apiLogShown) apiLogShown = true;
-        },
-      };
-      const reader =
-        apiPrefs.enabled && globalThis.__gaApiReader
-          ? globalThis.__gaApiReader.createHubApiReader(readerDeps, {
-              opsWarehouses: Array.isArray(job.opsWarehouses) ? job.opsWarehouses : opsListForJob,
-              verifyEveryN: 25,
-              ...apiShared,
-            })
-          : null;
+      })();
+      try {
+        await relearnInFlight;
+      } finally {
+        relearnInFlight = null;
+      }
+    }
+
+    const readerDeps = {
+      domScrape: domScrapeViaPool,
+      // Токены снимаем и с сессионной вкладки, и с той, где только что грузилась
+      // страница: свежие заголовки могут появиться на любой из них.
+      captureAndClear: async () => {
+        const out = [];
+        for (const id of [sessionTabId, lastPageTabId]) {
+          if (id == null) continue;
+          if (out.length && id === sessionTabId) continue;
+          out.push(...(await captureAndClearOnTab(id)));
+        }
+        return out;
+      },
+      replay: async (req, headers) => {
+        await ensureSessionTabAlive();
+        if (requestPacer) await requestPacer.take(1);
+        return replayApiOnTab(sessionTabId, req, headers);
+      },
+      normalize: (rawSnapshot, it) =>
+        normalizeArticleSnapshot(rawSnapshot, it?.articleId, it?.shipmentSource || ""),
+      relearnToken: relearnTokenShared,
+      isOnHubDomain: () => isTabOnArticleOrigin(sessionTabId),
+      log: (m) => {
+        logApi(m);
+        if (!apiLogShown) apiLogShown = true;
+      },
+    };
+
+    // Reader один на прогон: состояние типов, токены и счётчики общие, а
+    // «потоки» просто читают через него параллельно.
+    const reader = apiReadReady
+      ? globalThis.__gaApiReader.createHubApiReader(readerDeps, {
+          opsWarehouses: jobOpsList(),
+          verifyEveryN: 25,
+          ...apiShared,
+        })
+      : null;
+
+    // Если API так и не поднялся, весь прогон идёт страницами — тогда пул надо
+    // вернуть к числу потоков, иначе двух вкладок на всё не хватит.
+    let pagePoolGrown = !apiReadReady;
+    async function growPagePoolIfApiDead() {
+      if (pagePoolGrown || readStats.api > 0 || readStats.dom < 8) return;
+      pagePoolGrown = true;
+      const winId = state.workerWindowId;
+      if (winId == null) return;
+      while (pagePool.size() < threads) {
+        try {
+          const tab = await new Promise((resolve, reject) => {
+            chrome.tabs.create({ windowId: winId, url: "about:blank", active: false }, (t) => {
+              if (chrome.runtime.lastError || !t?.id) {
+                reject(new Error(chrome.runtime.lastError?.message || "нет вкладки"));
+                return;
+              }
+              resolve(t);
+            });
+          });
+          await forceTabPerformanceMode(tab.id).catch(() => {});
+          tabIds.push(tab.id);
+          pagePool.add(tab.id);
+        } catch {
+          break;
+        }
+      }
+      logApi(`Быстрое чтение не поднялось — вкладок под страницы: ${pagePool.size()}.`);
+    }
+
+    async function workerLoop(workerIndex) {
+      await sleep(Math.min(2000, workerIndex * 140));
 
       while (!state.abortRequested && (job.phase === "running" || job.phase === "paused")) {
         touchWorkerHeartbeat(mode);
@@ -2220,18 +2357,14 @@ async function runJobFromState(startPayload) {
           continue;
         }
 
-        await ensureTabNotDiscarded(workerTabId).catch(() => {});
-        if (runConfig.aggressiveMode) {
-          await bringWorkerTabToFront(state.workerWindowId, workerTabId);
-        }
-
+        // Вкладку под страницу берёт и готовит сам пул — здесь её больше нет.
         job.currentArticleId = item.articleId;
         await persistJob(job, mode);
 
         const itemStartedAt = Date.now();
-        ctx.item = item;
-        ctx.perf = { attempts: 0, markersFound: true, cycles: 1 };
-        const perf = ctx.perf;
+        relearnHintId = item.articleId;
+        const perf = { attempts: 0, markersFound: true, cycles: 1 };
+        perfByItem.set(item, perf);
         try {
           let data;
           let readPath = "dom";
@@ -2251,6 +2384,7 @@ async function runJobFromState(startPayload) {
           if (readPath === "api") readStats.api += 1;
           else readStats.dom += 1;
           job.readStats = { api: readStats.api, dom: readStats.dom };
+          await growPagePoolIfApiDead();
           // Диагностика быстрого чтения: попадает в «Результат», чтобы было
           // видно, почему тот или иной тип читается страницей.
           if (reader) {
@@ -2320,11 +2454,7 @@ async function runJobFromState(startPayload) {
             await persistJob(job, mode);
             return;
           }
-          if (msg.includes("Таймаут обработки в потоке")) {
-            try {
-              workerTabId = await respawnWorkerTab(workerTabId);
-            } catch {}
-          }
+          // Зависшую вкладку подменяет сам пул — здесь только учёт скорости.
           speedCtl.reportItem({
             ok: false,
             hardFail: msg.includes("Таймаут"),
@@ -2353,7 +2483,7 @@ async function runJobFromState(startPayload) {
       }
     }
 
-    await Promise.all(tabIds.map((id, idx) => workerLoop(id, idx)));
+    await Promise.all(Array.from({ length: threads }, (_, idx) => workerLoop(idx)));
 
     const queueExhausted = nextAssign >= toFetch.length;
     if (state.abortRequested || job.phase === "aborted") {
@@ -2652,7 +2782,20 @@ async function runDevDiagnostics(msg) {
       const snapshot = rec.api.supported ? RT.mapByType(articleType, info, content) : RT.mapUnsupported(apiId);
       rec.api.snapshot = snapshot;
       if (snapshot) {
-        const ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsWarehouses);
+        // Склад считаем ровно как рабочее чтение: не нашли наш в текущем месте —
+        // ищем в последней перевозке. Иначе отчёт показывал бы расхождения,
+        // которых в прогоне нет.
+        let ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsWarehouses);
+        if (!ops.matched && opsWarehouses.length && rec.api.supported) {
+          const carriage = (rec.api.requests || []).find((q) => /last-carriage/.test(q.url));
+          for (const place of RT.carriagePlaceNames(carriage?.body)) {
+            const hit = M.resolveOpsWarehouse(place, opsWarehouses);
+            if (hit.matched) {
+              ops = { matched: hit.matched, seen: true };
+              break;
+            }
+          }
+        }
         const shaped = Object.assign({}, snapshot, {
           operationalWarehouse: ops.matched,
           operationalWarehouseSeen: ops.seen,

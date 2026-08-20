@@ -138,6 +138,46 @@
     };
   }
 
+  // Пул вкладок: выдаёт свободную, ставит в очередь, если все заняты. Нужен,
+  // потому что чтение через API вкладку не занимает (навигации там нет), а
+  // чтение страницей занимает — и вкладок под страницы держим мало.
+  function createTabPool(initialIds) {
+    const ids = Array.isArray(initialIds) ? initialIds.slice() : [];
+    const free = ids.slice();
+    const waiters = [];
+    const pool = {
+      size: () => ids.length,
+      free: () => free.length,
+      waiting: () => waiters.length,
+      all: () => ids.slice(),
+      acquire() {
+        const id = free.shift();
+        if (id != null) return Promise.resolve(id);
+        return new Promise((resolve) => waiters.push(resolve));
+      },
+      release(id) {
+        if (id == null || !ids.includes(id)) return;
+        if (free.includes(id)) return;
+        const waiter = waiters.shift();
+        if (waiter) waiter(id);
+        else free.push(id);
+      },
+      add(id) {
+        if (id == null || ids.includes(id)) return;
+        ids.push(id);
+        pool.release(id);
+      },
+      // Зависшую вкладку меняем на свежую, не ломая очередь ожидающих.
+      replace(oldId, newId) {
+        const i = ids.indexOf(oldId);
+        if (i >= 0) ids[i] = newId;
+        const f = free.indexOf(oldId);
+        if (f >= 0) free.splice(f, 1);
+      },
+    };
+    return pool;
+  }
+
   // Машина состояний одного «канала» чтения: probe → on → off. Заводится
   // отдельно на каждый тип отправления, чтобы сбой одного типа не отключал
   // быстрое чтение остальных.
@@ -239,6 +279,7 @@
     snapshotsMatch,
     resolveOpsWarehouse,
     createRequestPacer,
+    createTabPool,
     createApiModeController,
   };
 });
