@@ -500,112 +500,125 @@
               </label>
               </section>
 
-              <section class="settings-group">
-                <h3 class="settings-group-title">Поведение и вид</h3>
-              <div class="field field-toggle field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">Быстрое чтение (API)</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: быстрое чтение через API"
-                    data-tip="Читает карточки прямым запросом к бэкенду вместо загрузки страницы — в разы быстрее и меньше нагрузка. При любом сбое расширение само возвращается к чтению через страницу. Отключите, если поведение показалось некорректным."
-                    >?</span>
-                </span>
-                <div class="field-toggle-row">
-                  <span class="field-toggle-text">Читать через API, если доступно</span>
-                  <label class="ui-switch">
-                    <input id="apiReadToggle" class="checkbox" type="checkbox" checked />
-                    <div class="ui-switch-track" aria-hidden="true"></div>
-                  </label>
-                </div>
-              </div>
-              <div class="field field-toggle">
-                <span class="field-label">Стиль расширения</span>
-                <div class="field-toggle-row">
-                  <span class="field-toggle-text">Переливающийся градиент</span>
-                  <label class="ui-switch">
-                    <input id="uiGradientToggle" class="checkbox" type="checkbox" checked />
-                    <div class="ui-switch-track" aria-hidden="true"></div>
-                  </label>
-                </div>
-              </div>
-              <div class="field field-toggle field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">Агрессивный режим</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: агрессивный режим"
-                    data-tip="Выводит окно парсинга на передний план и активирует рабочие вкладки. Без режима работа та же, но окно остаётся в фоне и не перехватывает фокус. Нужно, если Chrome троттлит фоновые вкладки."
-                    >?</span>
-                </span>
-                <div class="field-toggle-row">
-                  <span class="field-toggle-text">Форсировать вкладки и окно парсинга</span>
-                  <label class="ui-switch">
-                    <input id="aggressiveModeToggle" class="checkbox" type="checkbox" />
-                    <div class="ui-switch-track" aria-hidden="true"></div>
-                  </label>
-                </div>
-              </div>
-              <div class="field field-toggle field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">Память ID</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: отсекать ID из памяти"
-                    data-tip="Если включено, ID которые уже есть в памяти не попадают в предпросмотр и копирование. Выключение сразу возвращает их в предпросмотр и копирование без перезапуска обработки."
-                    >?</span>
-                </span>
-                <div class="field-toggle-row">
-                  <span class="field-toggle-text">Отсекать ID которые уже в памяти</span>
-                  <label class="ui-switch">
-                    <input id="excludeMemoryIdsToggle" class="checkbox" type="checkbox" />
-                    <div class="ui-switch-track" aria-hidden="true"></div>
-                  </label>
-                </div>
-              </div>
-              <div class="field field-toggle field-with-help">
-                <span class="field-label-row">
-                  <span class="field-label">Вывод гиперссылок</span>
-                  <span
-                    class="field-help"
-                    tabindex="0"
-                    role="button"
-                    aria-label="Справка: вывод гиперссылок"
-                    data-tip="При копировании в Excel колонки «ID отправления» и «Отправление» становятся формулами =ГИПЕРССЫЛКА. Для каждой колонки можно выбрать сервис: ASC, Touch или Hub."
-                    >?</span>
-                </span>
-                <div class="field-toggle-row">
-                  <span class="field-toggle-text">Включить гиперссылки при копировании</span>
-                  <label class="ui-switch">
-                    <input id="hyperlinksToggle" class="checkbox" type="checkbox" checked />
-                    <div class="ui-switch-track" aria-hidden="true"></div>
-                  </label>
-                </div>
-                <div id="hyperlinkServicesWrap" class="hyperlink-services" hidden>
-                  <div class="hyperlink-service-item">
-                    <label class="hyperlink-service-label" for="hyperlinkServiceArticleId">ID отправления</label>
-                    <select id="hyperlinkServiceArticleId" class="select-oz hyperlink-service-select" aria-label="Сервис гиперссылки для ID отправления">
-                      <option value="hub">Hub</option>
-                      <option value="asc">ASC</option>
-                      <option value="touch">Touch</option>
-                    </select>
+              <section id="behaviorGroup" class="settings-group settings-group--collapsible">
+                <button
+                  id="behaviorGroupToggle"
+                  type="button"
+                  class="settings-group-toggle"
+                  aria-expanded="false"
+                  aria-controls="behaviorGroupBody"
+                >
+                  <span class="settings-group-title">Поведение и вид</span>
+                  <span class="settings-group-chevron" aria-hidden="true"></span>
+                </button>
+                <div id="behaviorGroupBody" class="settings-group-body">
+                  <div class="settings-group-body-inner">
+                  <div class="field field-toggle field-with-help">
+                    <span class="field-label-row">
+                      <span class="field-label">Быстрое чтение (API)</span>
+                      <span
+                        class="field-help"
+                        tabindex="0"
+                        role="button"
+                        aria-label="Справка: быстрое чтение через API"
+                        data-tip="Читает карточки прямым запросом к бэкенду вместо загрузки страницы — в разы быстрее и меньше нагрузка. При любом сбое расширение само возвращается к чтению через страницу. Отключите, если поведение показалось некорректным."
+                        >?</span>
+                    </span>
+                    <div class="field-toggle-row">
+                      <span class="field-toggle-text">Читать через API, если доступно</span>
+                      <label class="ui-switch">
+                        <input id="apiReadToggle" class="checkbox" type="checkbox" checked />
+                        <div class="ui-switch-track" aria-hidden="true"></div>
+                      </label>
+                    </div>
                   </div>
-                  <div class="hyperlink-service-item">
-                    <label class="hyperlink-service-label" for="hyperlinkServiceShipment">Отправление</label>
-                    <select id="hyperlinkServiceShipment" class="select-oz hyperlink-service-select" aria-label="Сервис гиперссылки для отправления">
-                      <option value="hub">Hub</option>
-                      <option value="asc">ASC</option>
-                      <option value="touch">Touch</option>
-                    </select>
+                  <div class="field field-toggle">
+                    <span class="field-label">Стиль расширения</span>
+                    <div class="field-toggle-row">
+                      <span class="field-toggle-text">Переливающийся градиент</span>
+                      <label class="ui-switch">
+                        <input id="uiGradientToggle" class="checkbox" type="checkbox" checked />
+                        <div class="ui-switch-track" aria-hidden="true"></div>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="field field-toggle field-with-help">
+                    <span class="field-label-row">
+                      <span class="field-label">Агрессивный режим</span>
+                      <span
+                        class="field-help"
+                        tabindex="0"
+                        role="button"
+                        aria-label="Справка: агрессивный режим"
+                        data-tip="Выводит окно парсинга на передний план и активирует рабочие вкладки. Без режима работа та же, но окно остаётся в фоне и не перехватывает фокус. Нужно, если Chrome троттлит фоновые вкладки."
+                        >?</span>
+                    </span>
+                    <div class="field-toggle-row">
+                      <span class="field-toggle-text">Форсировать вкладки и окно парсинга</span>
+                      <label class="ui-switch">
+                        <input id="aggressiveModeToggle" class="checkbox" type="checkbox" />
+                        <div class="ui-switch-track" aria-hidden="true"></div>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="field field-toggle field-with-help">
+                    <span class="field-label-row">
+                      <span class="field-label">Память ID</span>
+                      <span
+                        class="field-help"
+                        tabindex="0"
+                        role="button"
+                        aria-label="Справка: отсекать ID из памяти"
+                        data-tip="Если включено, ID которые уже есть в памяти не попадают в предпросмотр и копирование. Выключение сразу возвращает их в предпросмотр и копирование без перезапуска обработки."
+                        >?</span>
+                    </span>
+                    <div class="field-toggle-row">
+                      <span class="field-toggle-text">Отсекать ID которые уже в памяти</span>
+                      <label class="ui-switch">
+                        <input id="excludeMemoryIdsToggle" class="checkbox" type="checkbox" />
+                        <div class="ui-switch-track" aria-hidden="true"></div>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="field field-toggle field-with-help">
+                    <span class="field-label-row">
+                      <span class="field-label">Вывод гиперссылок</span>
+                      <span
+                        class="field-help"
+                        tabindex="0"
+                        role="button"
+                        aria-label="Справка: вывод гиперссылок"
+                        data-tip="При копировании в Excel колонки «ID отправления» и «Отправление» становятся формулами =ГИПЕРССЫЛКА. Для каждой колонки можно выбрать сервис: ASC, Touch или Hub."
+                        >?</span>
+                    </span>
+                    <div class="field-toggle-row">
+                      <span class="field-toggle-text">Включить гиперссылки при копировании</span>
+                      <label class="ui-switch">
+                        <input id="hyperlinksToggle" class="checkbox" type="checkbox" checked />
+                        <div class="ui-switch-track" aria-hidden="true"></div>
+                      </label>
+                    </div>
+                    <div id="hyperlinkServicesWrap" class="hyperlink-services" hidden>
+                      <div class="hyperlink-service-item">
+                        <label class="hyperlink-service-label" for="hyperlinkServiceArticleId">ID отправления</label>
+                        <select id="hyperlinkServiceArticleId" class="select-oz hyperlink-service-select" aria-label="Сервис гиперссылки для ID отправления">
+                          <option value="hub">Hub</option>
+                          <option value="asc">ASC</option>
+                          <option value="touch">Touch</option>
+                        </select>
+                      </div>
+                      <div class="hyperlink-service-item">
+                        <label class="hyperlink-service-label" for="hyperlinkServiceShipment">Отправление</label>
+                        <select id="hyperlinkServiceShipment" class="select-oz hyperlink-service-select" aria-label="Сервис гиперссылки для отправления">
+                          <option value="hub">Hub</option>
+                          <option value="asc">ASC</option>
+                          <option value="touch">Touch</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
                   </div>
                 </div>
-              </div>
               </section>
 
               <section class="settings-group">
