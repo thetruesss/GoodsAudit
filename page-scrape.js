@@ -306,6 +306,25 @@
         if (/^\d{8,}$/.test(v)) continue;
         if (/[А-Яа-яA-Za-z]/.test(v)) return v;
       }
+
+      // Значение может лежать прямо в контейнере, без вложенного div/span/p —
+      // так на карточке отправления нарисован «Собственник», и по замерам он
+      // терялся на всех отправлениях подряд. querySelectorAll сам контейнер не
+      // возвращает, поэтому его текст берём отдельно, отрезав подпись, если она
+      // попала в тот же узел.
+      const ownText = normText(contentRoot.innerText || contentRoot.textContent || "");
+      const withoutLabel = ownText.toLowerCase().startsWith(targetLabel)
+        ? normText(ownText.slice(targetLabel.length))
+        : ownText;
+      const ownVal = sanitizeNamedValue(withoutLabel);
+      if (
+        ownVal &&
+        ownVal.toLowerCase() !== targetLabel &&
+        !/^\d{8,}$/.test(ownVal) &&
+        /[А-Яа-яA-Za-z]/.test(ownVal)
+      ) {
+        return ownVal;
+      }
     }
     return "";
   }
@@ -574,6 +593,12 @@
         if (considerPlace(c.textContent) && matched) {
           return { matched, seen };
         }
+      }
+      // Место тоже может лежать прямо в контейнере, без вложенного узла: тогда
+      // querySelectorAll его не отдаёт и склад выглядел бы «не найденным на
+      // странице», а такой объект уходит в ошибки вместо пропуска.
+      if (considerPlace(contentRoot.innerText || contentRoot.textContent || "") && matched) {
+        return { matched, seen };
       }
     }
 

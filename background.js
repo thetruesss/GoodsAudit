@@ -918,10 +918,13 @@ async function scrapeArticleOnTab(
     if (perf) perf.msNavigate = (perf.msNavigate || 0) + (Date.now() - tNav);
 
     await waitIfPaused();
-    const tSettle = Date.now();
-    await sleep(resolveSettleMs() + cycle * 100);
-    if (perf) perf.msSettle = (perf.msSettle || 0) + (Date.now() - tSettle);
-    await waitIfPaused();
+    // Страница готова, когда на ней появились данные, а не когда истекла
+    // фиксированная пауза. Замеры это показали в лоб: сама страница грузилась
+    // ~270 мс, маркеры приходили следом почти мгновенно, а мы поверх этого
+    // спали ещё ~900 мс — три четверти всего времени чтения уходило в пустую
+    // паузу. Ждём маркеры и читаем сразу; неполный снапшот всё равно
+    // перечитывается циклом ниже, и авто-скорость поднимет паузу, если начнёт
+    // промахиваться.
     const tMarkers = Date.now();
     const markersFound = await waitForDataMarkers(
       tabId,
@@ -935,6 +938,14 @@ async function scrapeArticleOnTab(
       perf.markersFound = (perf.markersFound !== false) && markersFound;
     }
     await waitIfPaused();
+    // Пауза остаётся только для случая, когда данных на странице так и нет:
+    // либо она ещё рисуется, либо это редкий макет без наших маркеров.
+    if (!markersFound) {
+      const tSettle = Date.now();
+      await sleep(resolveSettleMs() + cycle * 100);
+      if (perf) perf.msSettle = (perf.msSettle || 0) + (Date.now() - tSettle);
+      await waitIfPaused();
+    }
     const tInject = Date.now();
     await execScriptFiles(tabId, ["page-scrape.js"]);
     if (perf) perf.msInject = (perf.msInject || 0) + (Date.now() - tInject);
@@ -2652,7 +2663,20 @@ async function runDevDiagnostics(msg) {
       const snapshot = rec.api.supported ? RT.mapByType(articleType, info, content) : RT.mapUnsupported(apiId);
       rec.api.snapshot = snapshot;
       if (snapshot) {
-        const ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsWarehouses);
+        // Склад считаем ровно как рабочее чтение: не нашли наш в текущем месте —
+        // ищем в последней перевозке. Иначе отчёт показывал бы расхождения,
+        // которых в прогоне нет.
+        let ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsWarehouses);
+        if (!ops.matched && opsWarehouses.length && rec.api.supported) {
+          const carriage = (rec.api.requests || []).find((q) => /last-carriage/.test(q.url));
+          for (const place of RT.carriagePlaceNames(carriage?.body)) {
+            const hit = M.resolveOpsWarehouse(place, opsWarehouses);
+            if (hit.matched) {
+              ops = { matched: hit.matched, seen: true };
+              break;
+            }
+          }
+        }
         const shaped = Object.assign({}, snapshot, {
           operationalWarehouse: ops.matched,
           operationalWarehouseSeen: ops.seen,
