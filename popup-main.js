@@ -2717,6 +2717,68 @@ const API_CHANNEL_TITLES = {
   off: "быстрое чтение",
 };
 
+function apiChannelTitle(name) {
+  const key = String(name || "");
+  if (API_CHANNEL_TITLES[key]) return API_CHANNEL_TITLES[key];
+  if (key.startsWith("unsupported:")) return `неподдерживаемый тип «${key.slice(12)}»`;
+  return key;
+}
+
+// Почему быстрое чтение не ускорило прогон: путь чтения и причина, по которой
+// тип вернулся на страницы (с конкретными расхождениями). Строка убиралась
+// как ненужная, но без неё падение скорости приходится искать вслепую —
+// вернулась вместе с починкой одиночных помарок.
+function formatApiDiagnostics(job) {
+  const stats = job?.readStats;
+  const channels = job?.apiChannels;
+  const fallbacks = job?.apiFallbacks;
+  if (!stats && !channels) return "";
+  const lines = [];
+  const api = Math.max(0, Number(stats?.api) || 0);
+  const dom = Math.max(0, Number(stats?.dom) || 0);
+  if (api + dom > 0) {
+    lines.push(`\nБыстрое чтение: через API ${api}, страницей ${dom}.`);
+  }
+  // Почему читали страницей — с частотой каждой причины.
+  if (Array.isArray(fallbacks) && fallbacks.length) {
+    const parts = fallbacks
+      .filter((f) => f && f.reason)
+      .map((f) => `${f.reason} — ${Math.max(0, Number(f.count) || 0)}`);
+    if (parts.length) lines.push(`Причины чтения страницей: ${parts.join("; ")}.`);
+  }
+  if (channels && typeof channels === "object") {
+    for (const [name, info] of Object.entries(channels)) {
+      if (!info) continue;
+      const title = apiChannelTitle(name);
+      const samples = Array.isArray(info.samples) ? info.samples : [];
+      const detail = samples.length
+        ? samples.map((s) => `${s.field}: API «${s.api}» ≠ страница «${s.dom}»`).join("; ")
+        : info.reason || info.lastError || "";
+      if (info.phase === "on") {
+        // Тип работает, но если по пути были расхождения — показываем их:
+        // такие объекты читаются страницей, то есть тормозят прогон.
+        if (samples.length) {
+          lines.push(`API работает (${title}), но были расхождения: ${detail}`);
+        }
+        continue;
+      }
+      if (info.phase === "off") {
+        lines.push(`API отключён (${title}): ${detail || "сбой чтения"}`);
+      } else if (detail) {
+        // Канал ещё проверяется — но причина, по которой он не включился,
+        // важнее молчания: без неё непонятно, почему нет ускорения.
+        lines.push(`API проверяется (${title}): ${detail}`);
+      } else {
+        lines.push(`API проверяется (${title}): сверка со страницей ещё идёт`);
+      }
+      if (Array.isArray(info.learned) && info.learned.length) {
+        lines.push(`Выучены подписи: ${info.learned.join("; ")}`);
+      }
+    }
+  }
+  return lines.length ? lines.join("\n") : "";
+}
+
 function formatStatus(job) {
   if (!job) {
     return [
@@ -2771,6 +2833,8 @@ function formatStatus(job) {
     );
   }
   if (job.sourceName) lines.push(`\nФайл: ${job.sourceName}`);
+  const apiDiag = formatApiDiagnostics(job);
+  if (apiDiag) lines.push(`\n${apiDiag.replace(/^\n/, "")}`);
   if (job.phase === "done" || job.phase === "aborted") {
     if (job.errors?.length) {
       const shown = job.errors.slice(0, MAX_STATUS_DETAIL_LINES);

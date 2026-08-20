@@ -248,26 +248,69 @@ test("неподдерживаемые типы идут одним канало
 });
 
 test("сломанная ручка деталей отключает тип, а не крутится вечно", async () => {
-  const ids = ["501883634205070", "501883634205071", "501883634205072"];
+  const ids = [];
   const infos = {};
   const contents = {};
-  ids.forEach((id) => {
+  for (let i = 0; i < 10; i++) {
+    const id = "50188363420707" + i;
+    ids.push(id);
     infos[id] = postingInfo(id);
     contents[id] = postingContent;
-  });
+  }
   const { state, deps } = makeDriver({
     infos,
     contents,
     status: (url) => (url.includes("/Posting/info") ? 500 : 200),
   });
-  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
-  await reader.read({ articleId: ids[0] });
-  await reader.read({ articleId: ids[1] });
-  assert.strictEqual(reader.getPhase("posting"), "off", "тип отключён после сбоев");
+  const reader = R.createHubApiReader(deps, {
+    verifyEveryN: 0,
+    maxProbeFails: 2,
+    maxTransientRetries: 0,
+  });
+  for (let i = 0; i < 2; i++) await reader.read({ articleId: ids[i] });
+  assert.strictEqual(reader.getPhase("posting"), "off", "ручка не отвечает — тип отключён");
   const before = state.replayCalls;
-  const r = await reader.read({ articleId: ids[2] });
+  const r = await reader.read({ articleId: ids[3] });
   assert.strictEqual(r.path, "dom");
   assert.ok(state.replayCalls - before <= 1, "к сломанной ручке больше не ходим");
+});
+
+test("одиночные помарки сети не выключают тип", async () => {
+  const ids = [];
+  const infos = {};
+  const contents = {};
+  for (let i = 0; i < 9; i++) {
+    const id = "50188363420708" + i;
+    ids.push(id);
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  }
+  // Каждый третий объект спотыкается — но между ними всё читается нормально.
+  const stumbling = new Set([ids[2], ids[5], ids[8]]);
+  const { deps } = makeDriver({
+    infos,
+    contents,
+    status: (url) => ([...stumbling].some((id) => url.includes(id)) ? 0 : 200),
+  });
+  const reader = R.createHubApiReader(deps, {
+    verifyEveryN: 0,
+    maxTransportFails: 3,
+    maxTransientRetries: 0,
+  });
+
+  const paths = [];
+  for (const id of ids) paths.push((await reader.read({ articleId: id })).path);
+
+  assert.strictEqual(
+    reader.getPhase("posting"),
+    "on",
+    "три помарки вразбивку — это не поломка канала"
+  );
+  assert.strictEqual(
+    paths.filter((p) => p === "api").length,
+    ids.length - stumbling.size - 1,
+    "всё, кроме пробы и спотыкнувшихся, прочитано через API"
+  );
 });
 
 test("расхождение с DOM на probe → тип уходит в off и читается страницей", async () => {
@@ -369,7 +412,11 @@ test("401 в режиме on → переучивание и возврат к A
 
 test("не удалось определить тип → полностью уходим на страницы", async () => {
   const { state, deps } = makeDriver({ status: () => 500 });
-  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, maxProbeFails: 2 });
+  const reader = R.createHubApiReader(deps, {
+    verifyEveryN: 0,
+    maxProbeFails: 2,
+    maxTransientRetries: 0,
+  });
   const r1 = await reader.read({ articleId: "1000000000001" });
   assert.strictEqual(r1.path, "dom");
   await reader.read({ articleId: "1000000000002" });

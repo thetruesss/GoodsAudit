@@ -36,15 +36,22 @@
     maxProbeFails: 2,
     maxRelearnFails: 2,
     maxMiscompares: 2,
-    maxRateLimitRetries: 3, // сколько раз переждать 429/503 по одному запросу
+    maxTransientRetries: 3, // сколько раз переждать 429/5xx/обрыв по одному запросу
+    // Сколько сбоев транспорта подряд считать поломкой канала. Одиночные
+    // помарки бывают у всех, а вот пять подряд — это уже не помарка.
+    maxTransportFails: 5,
     opsWarehouses: [], // список опер. складов пользователя для паритета фильтра
   };
 
   const UNSUPPORTED_CHANNEL = "unsupported";
 
-  // Ответы, на которых нужно подождать и повторить, а не считать ручку сломанной.
-  const RATE_LIMIT_STATUSES = new Set([429, 503]);
-  const RATE_LIMIT_BACKOFF_MS = 500;
+  // Ответы, на которых нужно подождать и повторить, а не считать ручку
+  // сломанной: просьба притормозить (429), временный отказ сервиса (5xx) и
+  // ноль — это когда запрос вообще не ушёл, например вкладка была занята
+  // переходом. Ни один из них не говорит, что наш маппинг разошёлся со
+  // страницей.
+  const TRANSIENT_STATUSES = new Set([0, 429, 500, 502, 503, 504]);
+  const TRANSIENT_BACKOFF_MS = 500;
 
   // Номера прочитанного, на которых делаем контрольную сверку: base, потом шаг
   // удваивается до потолка (25, 75, 175, 375, 775, 1575, дальше каждые cap).
@@ -176,6 +183,32 @@
       return domRead(item);
     }
 
+    // Сбой транспорта — не то же самое, что расхождение данных. Сеть моргнула,
+    // вкладка была занята переходом, сервис на секунду отдал 500 — про паритет
+    // маппинга это не говорит ничего, и лечится это повтором, а не отключением
+    // типа. Считаем такие сбои отдельно и только подряд идущие: любое удачное
+    // чтение обнуляет счётчик. Без этого две случайные помарки за многочасовой
+    // прогон навсегда выключали тип, и всё остальное читалось страницами.
+    const transportFails =
+      opts.sharedTransportFails instanceof Map ? opts.sharedTransportFails : new Map();
+    function noteTransportFailure(name, reason) {
+      const key = String(name || "unknown");
+      // Пока канал не подтверждён, поблажек нет: доверия к нему ещё не было, а
+      // страница рядом. Терпим помарки только у работающего канала — там за
+      // отключение платит весь оставшийся прогон.
+      if (channelFor(key).getPhase() !== "on") return reportChannelFailure(key, reason);
+      const next = (transportFails.get(key) || 0) + 1;
+      transportFails.set(key, next);
+      noteDiag(key, { lastError: String(reason || "") });
+      if (next < opts.maxTransportFails) return channelFor(key).getPhase();
+      transportFails.set(key, 0);
+      return reportChannelFailure(key, `${reason} (подряд ${next})`);
+    }
+    function noteTransportOk(name) {
+      const key = String(name || "unknown");
+      if (transportFails.get(key)) transportFails.set(key, 0);
+    }
+
     // Ошибка чтения по каналу: на probe это неудачная проба, в режиме on —
     // расхождение доверия. Без этого сломанная ручка никогда не отключалась бы.
     function reportChannelFailure(name, reason) {
@@ -224,13 +257,12 @@
       }
       const status = Number(res?.status) || 0;
       if (status === 401 || status === 403) return { ok: false, status, needRelearn: true };
-      // 429 и 503 — не поломка ручки, а просьба притормозить. Ограничитель уже
-      // сбросил скорость вдвое; нам остаётся подождать и повторить. Считать это
-      // сбоем канала нельзя: один всплеск нагрузки выключил бы быстрое чтение
-      // целиком, и весь прогон ушёл бы на страницы.
-      if (RATE_LIMIT_STATUSES.has(status) && attempt < opts.maxRateLimitRetries) {
+      // Временный отказ — не поломка ручки. Ждём и повторяем: считать это
+      // сбоем канала нельзя, иначе один всплеск нагрузки выключил бы быстрое
+      // чтение целиком, и весь прогон ушёл бы на страницы.
+      if (TRANSIENT_STATUSES.has(status) && attempt < opts.maxTransientRetries) {
         const hinted = Number(res?.retryAfterMs) || 0;
-        await delay(Math.max(hinted, RATE_LIMIT_BACKOFF_MS * Math.pow(2, attempt)));
+        await delay(Math.max(hinted, TRANSIENT_BACKOFF_MS * Math.pow(2, attempt)));
         return apiGet(request, attempt + 1);
       }
       if (status !== 200 || res?.body == null) return { ok: false, status, error: "http-" + status };
@@ -418,7 +450,7 @@
       }
       if (!resolved || resolved.failed) {
         const why = resolved?.status ? `http-${resolved.status}` : "нет ответа";
-        reportChannelFailure("resolve", `определение типа: ${why}`);
+        noteTransportFailure("resolve", `определение типа: ${why}`);
         if (resolveCtl.getPhase() === "off") {
           log("API: не удалось определить тип отправления — дальше читаю страницами.");
         }
@@ -426,6 +458,7 @@
       }
       resolveCtl.probeSuccess();
       resolveCtl.batchOk();
+      noteTransportOk("resolve");
 
       // Шаг 2 — канал этого типа. Все неподдерживаемые типы идут одним каналом:
       // страница показывает «Неподдерживаемый тип» вообще всему, что вне трёх
@@ -468,9 +501,11 @@
           return domRes;
         }
         const why = attempt.error || "read-failed";
-        reportChannelFailure(channel, why);
+        noteTransportFailure(channel, why);
         return fallbackToDom(item, `чтение деталей: ${why}`);
       }
+
+      noteTransportOk(channel);
 
       // Пока канал не подтверждён, пробу делает кто-то один — остальные ждут
       // её исхода и идут уже по готовому решению.
