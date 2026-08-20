@@ -355,7 +355,18 @@
     return snap;
   }
 
+  // Ручка карточки коробки отвечает конвертом {info, isSupported} и умеет сама
+  // сказать, что объект профилю не по зубам. Страница на таком рисует информер
+  // «Неподдерживаемый тип» — и наш DOM-скрейпер помечает его как
+  // unsupportedTransitBox.
+  function payloadSaysUnsupported(articleType, body) {
+    if (!body || typeof body !== "object") return false;
+    if (!Object.prototype.hasOwnProperty.call(body, "isSupported")) return false;
+    return body.isSupported === false || body.info == null;
+  }
+
   function mapTransitBox(payload, content) {
+    if (payloadSaysUnsupported("boxTransit", payload)) return mapUnsupported("");
     const box = payload?.info && typeof payload.info === "object" ? payload.info : payload;
     if (!box || typeof box !== "object") return null;
     const main = box.mainInfo && typeof box.mainInfo === "object" ? box.mainInfo : {};
@@ -502,6 +513,7 @@
     resolveTypeRequest,
     infoRequest,
     contentRequest,
+    payloadSaysUnsupported,
     lastCarriageRequest,
     carriagePlaceNames,
     firstNomenclature,

@@ -642,10 +642,17 @@ async function waitUntilArticlePage(
 }
 
 // --- API-чтение: браузерные примитивы для api-reader.js ---------------------
-// Потолок запросов в секунду на весь прогон. Объекту нужно 3-4 запроса
-// (тип, карточка, состав, иногда перевозка), так что это и есть реальный
-// предел скорости: 40 rps ≈ 11 объектов в секунду.
+// Запросы в секунду на весь прогон. Объекту нужно 3-4 запроса (тип, карточка,
+// состав, иногда перевозка), так что это и есть предел скорости чтения: 40 rps
+// — примерно 12 объектов в секунду, 160 — около 50.
+//
+// Начинаем со спокойной планки и поднимаем её, только пока сервис отвечает
+// чисто и в обычном темпе; на 429, 5xx или обрыве планка падает вдвое и встаёт
+// пауза. Потолок — не обещание разогнаться до него, а граница, выше которой не
+// пойдём, даже если сервис молчит о проблемах.
 const API_READ_DEFAULT_RPS = 40;
+const API_READ_MAX_RPS = 160;
+const API_READ_MIN_RPS = 8;
 const ARTICLE_ORIGIN = "https://returns.o3t.ru";
 
 async function getApiReadPrefs() {
@@ -716,18 +723,23 @@ async function replayApiOnTab(tabId, req, headers) {
             init.body = request.body;
           }
           return fetch(request.url, init)
-            .then((r) =>
-              r
+            .then((r) => {
+              // Retry-After сервис присылает вместе с 429: это его собственный
+              // ответ на вопрос «через сколько можно», угадывать не нужно.
+              const ra = r.headers && r.headers.get ? r.headers.get("retry-after") : null;
+              const raSec = ra == null ? NaN : Number(ra);
+              const retryAfterMs = Number.isFinite(raSec) ? Math.max(0, raSec) * 1000 : 0;
+              return r
                 .text()
                 .then((t) => {
                   let data = null;
                   try {
                     data = t ? JSON.parse(t) : null;
                   } catch (e) {}
-                  return { status: r.status, body: data };
+                  return { status: r.status, body: data, retryAfterMs };
                 })
-                .catch(() => ({ status: r.status, body: null }))
-            )
+                .catch(() => ({ status: r.status, body: null, retryAfterMs }));
+            })
             .catch((e) => ({ status: 0, body: null, error: String(e) }));
         },
       },
@@ -2022,7 +2034,14 @@ async function runJobFromState(startPayload) {
   const apiPrefs = await getApiReadPrefs();
   const requestPacer =
     apiPrefs.enabled && globalThis.__gaApiMapping
-      ? globalThis.__gaApiMapping.createRequestPacer(apiPrefs.rps)
+      ? globalThis.__gaApiMapping.createRequestPacer(apiPrefs.rps, {
+          minRps: API_READ_MIN_RPS,
+          maxRps: Math.max(apiPrefs.rps, API_READ_MAX_RPS),
+          // 12 ступеней по 10 rps: подъём занимает первую сотню объектов, и на
+          // каждой ступени у сервиса есть возможность нас притормозить.
+          stepUpRps: 10,
+          okBeforeStepUp: 30,
+        })
       : null;
   const readStats = { api: 0, dom: 0 };
   // Состояние быстрого чтения общее на все потоки: типы проверяются один раз
@@ -2255,7 +2274,14 @@ async function runJobFromState(startPayload) {
       replay: async (req, headers) => {
         await ensureSessionTabAlive();
         if (requestPacer) await requestPacer.take(1);
-        return replayApiOnTab(sessionTabId, req, headers);
+        const startedAt = Date.now();
+        const res = await replayApiOnTab(sessionTabId, req, headers);
+        requestPacer?.report?.({
+          status: Number(res?.status) || 0,
+          ms: Date.now() - startedAt,
+          retryAfterMs: Number(res?.retryAfterMs) || 0,
+        });
+        return res;
       },
       normalize: (rawSnapshot, it) =>
         normalizeArticleSnapshot(rawSnapshot, it?.articleId, it?.shipmentSource || ""),
@@ -2391,6 +2417,10 @@ async function runJobFromState(startPayload) {
           if (readPath === "api") readStats.api += 1;
           else readStats.dom += 1;
           job.readStats = { api: readStats.api, dom: readStats.dom };
+          // В интерфейс не выводится: нужно, чтобы по сохранённой задаче
+          // было видно, до какой скорости дошёл ограничитель и просил ли
+          // сервис притормозить.
+          if (requestPacer?.stats) job.apiRate = requestPacer.stats();
           await growPagePoolIfApiDead();
           // Диагностика быстрого чтения: попадает в «Результат», чтобы было
           // видно, почему тот или иной тип читается страницей.
@@ -2571,313 +2601,6 @@ async function runJobFromState(startPayload) {
   }
 }
 
-// --- DEV-диагностика ---------------------------------------------------------
-// Собирает по выборке объектов всё, что нужно для разбора: сырые ответы API,
-// прочитанную страницу, из чего страница собрана, расхождения поле в поле и
-// разбивку времени по этапам. Токены сюда не попадают — только имена
-// заголовков, которые до API доехали.
-const DEV_DIAG_KEY = "goodsAuditDevDiagV1";
-const DEV_DIAG_MAX_ITEMS = 60;
-let devDiagRunning = false;
-let devDiagAbort = false;
-
-async function readDevDiagState() {
-  try {
-    const { [DEV_DIAG_KEY]: st } = await chrome.storage.local.get(DEV_DIAG_KEY);
-    return st && typeof st === "object" ? st : null;
-  } catch {
-    return null;
-  }
-}
-
-async function writeDevDiagState(patch) {
-  const prev = (await readDevDiagState()) || {};
-  const next = Object.assign({}, prev, patch);
-  try {
-    await chrome.storage.local.set({ [DEV_DIAG_KEY]: next });
-  } catch {}
-  return next;
-}
-
-// Берём объекты «вразбивку» по всему списку, а не первые подряд: так в выборку
-// попадают разные типы отправлений, а не один хвост файла.
-function sampleArticleIds(ids, limit) {
-  const uniq = [...new Set(ids.map((x) => String(x || "").trim()).filter(Boolean))];
-  const n = Math.max(1, Math.min(DEV_DIAG_MAX_ITEMS, Math.floor(Number(limit) || 0) || 20));
-  if (uniq.length <= n) return uniq;
-  const step = uniq.length / n;
-  const out = [];
-  for (let i = 0; i < n; i++) out.push(uniq[Math.floor(i * step)]);
-  return [...new Set(out)];
-}
-
-function diffSnapshots(apiData, domData) {
-  const fields = globalThis.__gaApiMapping?.SCRAPE_FIELDS || [];
-  const out = [];
-  for (const f of fields) {
-    const a = apiData?.[f];
-    const d = domData?.[f];
-    const same = f === "price" ? Number(a) === Number(d) : String(a ?? "") === String(d ?? "");
-    if (!same) out.push({ field: f, api: a ?? null, dom: d ?? null });
-  }
-  return out;
-}
-
-async function devApiCall(tabId, req, headers, log) {
-  if (!req) return null;
-  const t0 = Date.now();
-  let res;
-  try {
-    res = await replayApiOnTab(tabId, req, headers);
-  } catch (e) {
-    res = { status: 0, body: null, error: String((e && e.message) || e) };
-  }
-  const entry = {
-    url: req.url,
-    method: req.method || "GET",
-    status: Number(res?.status) || 0,
-    ms: Date.now() - t0,
-    body: res?.body ?? null,
-  };
-  if (res?.error) entry.error = String(res.error);
-  log.push(entry);
-  return entry;
-}
-
-async function runDevDiagnostics(msg) {
-  const RT = globalThis.__gaApiReturns;
-  const M = globalThis.__gaApiMapping;
-  const opsWarehouses = Array.isArray(msg.opsWarehouses)
-    ? msg.opsWarehouses.map((x) => String(x || "").trim()).filter(Boolean)
-    : [];
-
-  let sourceText = String(msg.sourceText || "").trim();
-  if (msg.sourceFromCache && globalThis.__goodsAuditCache) {
-    try {
-      const entry = await globalThis.__goodsAuditCache.loadSourceCache(
-        normalizeSourceMode(msg.sourceMode)
-      );
-      if (entry?.text) sourceText = String(entry.text).trim();
-    } catch {}
-  }
-  if (!sourceText) throw new Error("Нет исходника: вставьте ID или выберите файл.");
-
-  const parsed = globalThis.__returnsParseSourceRows(sourceText, false);
-  const ids = sampleArticleIds((parsed.rows || []).map((r) => r.articleId), msg.limit);
-  if (!ids.length) throw new Error("В исходнике не нашлось ни одного ID.");
-
-  const started = Date.now();
-  const report = {
-    kind: "goodsaudit-dev-diagnostics",
-    version: 1,
-    extensionVersion: chrome.runtime.getManifest?.()?.version || "",
-    startedAt: new Date(started).toISOString(),
-    opsWarehouses,
-    sampleSize: ids.length,
-    // Значения заголовков не сохраняем принципиально — только имена.
-    authHeaderNames: [],
-    items: [],
-    totals: {},
-  };
-
-  // Своё окно, а не общее рабочее: диагностика не должна трогать состояние
-  // прогона и его вкладки.
-  const { windowId, tabId } = await openDevWindow();
-  let authHeaders = {};
-
-  try {
-    for (let i = 0; i < ids.length; i++) {
-      if (devDiagAbort) break;
-      const articleId = ids[i];
-      await writeDevDiagState({
-        phase: "running",
-        done: i,
-        total: ids.length,
-        currentArticleId: articleId,
-      });
-
-      const rec = { articleId, api: { requests: [] }, dom: {}, diff: null };
-      const item = { articleId, shipmentSource: "" };
-
-      // 1) Страница. Она же обновляет токены в перехватчике.
-      const perf = { attempts: 0, markersFound: true, cycles: 1 };
-      const tDom = Date.now();
-      let domRaw = null;
-      try {
-        domRaw = await scrapeArticleOnTab(
-          tabId,
-          articleId,
-          () => 900,
-          opsWarehouses,
-          "",
-          () => devDiagAbort,
-          () => false,
-          perf
-        );
-      } catch (e) {
-        rec.dom.error = String((e && e.message) || e);
-      }
-      rec.dom.ms = Date.now() - tDom;
-      rec.dom.perf = perf;
-      rec.dom.raw = domRaw;
-      rec.dom.data = domRaw ? normalizeArticleSnapshot(domRaw, articleId, "") : null;
-
-      // 2) Из чего страница собрана — таблицы, свойства, бейджи.
-      try {
-        await execScriptFiles(tabId, ["page-scrape.js"]);
-        const probe = await execScriptFunc(
-          tabId,
-          (ops) => {
-            try {
-              const fn = globalThis.__returnsDevProbe;
-              return typeof fn === "function" ? fn(ops || []) : { __error: "нет __returnsDevProbe" };
-            } catch (e) {
-              return { __error: String((e && e.message) || e) };
-            }
-          },
-          [opsWarehouses]
-        );
-        rec.dom.probe = probe?.[0]?.result ?? null;
-      } catch (e) {
-        rec.dom.probeError = String((e && e.message) || e);
-      }
-
-      // 3) Токены — из живой страницы, в отчёт идут только имена заголовков.
-      try {
-        const fresh = M.latestAuthHeaders(await captureAndClearOnTab(tabId));
-        if (Object.keys(fresh).length) authHeaders = fresh;
-      } catch {}
-      rec.api.authHeaderNames = Object.keys(authHeaders);
-      for (const name of rec.api.authHeaderNames) {
-        if (!report.authHeaderNames.includes(name)) report.authHeaderNames.push(name);
-      }
-
-      // 4) API теми же ручками и в том же порядке, что и в рабочем чтении.
-      const tApi = Date.now();
-      const typeRes = await devApiCall(
-        tabId,
-        RT.resolveTypeRequest(articleId),
-        authHeaders,
-        rec.api.requests
-      );
-      const articleType = String(typeRes?.body?.articleType || "").trim();
-      const apiId = String(typeRes?.body?.articleId ?? "").trim() || articleId;
-      rec.api.articleType = articleType;
-      rec.api.articleId = apiId;
-      rec.api.supported = RT.isSupportedType(articleType);
-
-      let info = null;
-      let content = null;
-      if (rec.api.supported) {
-        const [infoRes, contentRes] = await Promise.all([
-          devApiCall(tabId, RT.infoRequest(articleType, apiId), authHeaders, rec.api.requests),
-          devApiCall(tabId, RT.contentRequest(articleType, apiId), authHeaders, rec.api.requests),
-        ]);
-        info = infoRes?.body ?? null;
-        content = contentRes?.body ?? null;
-      }
-      // Перевозку спрашиваем по тому же условию, что и рабочее чтение: только
-      // когда текущее место не наше. Иначе отчёт завышал бы число запросов на
-      // объект — а это и есть предел скорости.
-      const preSnapshot = rec.api.supported
-        ? RT.mapByType(articleType, info, content)
-        : RT.mapUnsupported(apiId);
-      const preOps = M.resolveOpsWarehouse(preSnapshot?.operationalWarehouse, opsWarehouses);
-      if (rec.api.supported && opsWarehouses.length && !preOps.matched) {
-        await devApiCall(
-          tabId,
-          RT.lastCarriageRequest(articleType, apiId),
-          authHeaders,
-          rec.api.requests
-        );
-      }
-      rec.api.ms = Date.now() - tApi;
-
-      // 5) Наш маппинг: что мы из этого собираем и что мешает включиться.
-      rec.api.unknownCodes = rec.api.supported ? RT.unknownCodesInInfo(articleType, info) : [];
-      const snapshot = preSnapshot;
-      rec.api.snapshot = snapshot;
-      if (snapshot) {
-        // Склад считаем ровно как рабочее чтение: не нашли наш в текущем месте —
-        // берём его из последней перевозки. Иначе отчёт показывал бы
-        // расхождения, которых в прогоне нет.
-        let ops = preOps;
-        if (!ops.matched && opsWarehouses.length && rec.api.supported) {
-          const carriage = (rec.api.requests || []).find((q) => /last-carriage/.test(q.url));
-          for (const place of RT.carriagePlaceNames(carriage?.body)) {
-            const hit = M.resolveOpsWarehouse(place, opsWarehouses);
-            if (hit.matched) {
-              ops = { matched: hit.matched, seen: true };
-              break;
-            }
-          }
-        }
-        const shaped = Object.assign({}, snapshot, {
-          operationalWarehouse: ops.matched,
-          operationalWarehouseSeen: ops.seen,
-        });
-        rec.api.data = normalizeArticleSnapshot(shaped, articleId, "");
-        rec.diff = diffSnapshots(rec.api.data, rec.dom.data);
-      }
-
-      report.items.push(rec);
-    }
-  } finally {
-    await safeRemoveWindow(windowId).catch(() => {});
-  }
-
-  const domTimes = report.items.map((r) => Number(r.dom?.ms) || 0);
-  const apiTimes = report.items.map((r) => Number(r.api?.ms) || 0);
-  const sum = (a) => a.reduce((x, y) => x + y, 0);
-  const avg = (a) => (a.length ? Math.round(sum(a) / a.length) : 0);
-  const phase = (k) => avg(report.items.map((r) => Number(r.dom?.perf?.[k]) || 0));
-  report.totals = {
-    items: report.items.length,
-    msTotal: Date.now() - started,
-    domAvgMs: avg(domTimes),
-    apiAvgMs: avg(apiTimes),
-    domPhaseAvgMs: {
-      navigate: phase("msNavigate"),
-      settle: phase("msSettle"),
-      markers: phase("msMarkers"),
-      inject: phase("msInject"),
-      read: phase("msRead"),
-    },
-    itemsWithDiff: report.items.filter((r) => (r.diff || []).length).length,
-    byArticleType: report.items.reduce((acc, r) => {
-      const k = r.api?.articleType || "неизвестен";
-      acc[k] = (acc[k] || 0) + 1;
-      return acc;
-    }, {}),
-  };
-  report.finishedAt = new Date().toISOString();
-  return report;
-}
-
-async function openDevWindow() {
-  const win = await new Promise((resolve, reject) => {
-    chrome.windows.create(
-      { url: "about:blank", focused: false, type: "normal", width: 440, height: 320, left: 48, top: 48 },
-      (w) => {
-        if (chrome.runtime.lastError || !w?.id) {
-          reject(new Error(chrome.runtime.lastError?.message || "Не удалось открыть окно диагностики"));
-          return;
-        }
-        resolve(w);
-      }
-    );
-  });
-  await sleep(120);
-  const tabs = await new Promise((resolve) => chrome.tabs.query({ windowId: win.id }, resolve));
-  const tabId = tabs?.[0]?.id;
-  if (tabId == null) {
-    await safeRemoveWindow(win.id).catch(() => {});
-    throw new Error("Во вкладке диагностики нет вкладки");
-  }
-  await forceTabPerformanceMode(tabId).catch(() => {});
-  return { windowId: win.id, tabId };
-}
-
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!isTrustedExtensionSender(sender)) {
     sendResponse({ ok: false, error: "forbidden" });
@@ -2893,67 +2616,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
-  if (msg?.type === "DEV_DIAG_START") {
-    if (devDiagRunning) {
-      sendResponse({ ok: false, error: "Диагностика уже идёт." });
-      return false;
-    }
-    if (runStates.file.running || runStates.text.running) {
-      sendResponse({ ok: false, error: "Сначала остановите прогон." });
-      return false;
-    }
-    devDiagRunning = true;
-    devDiagAbort = false;
-    sendResponse({ ok: true });
-    void (async () => {
-      await writeDevDiagState({
-        phase: "running",
-        done: 0,
-        total: 0,
-        currentArticleId: null,
-        error: "",
-        report: null,
-      });
-      try {
-        const report = await runDevDiagnostics(msg || {});
-        await writeDevDiagState({
-          phase: devDiagAbort ? "aborted" : "done",
-          done: report.items.length,
-          total: report.items.length,
-          currentArticleId: null,
-          report,
-        });
-      } catch (e) {
-        await writeDevDiagState({
-          phase: "error",
-          currentArticleId: null,
-          error: String((e && e.message) || e),
-          report: null,
-        });
-      } finally {
-        devDiagRunning = false;
-        devDiagAbort = false;
-      }
-    })();
-    return false;
-  }
-
-  if (msg?.type === "DEV_DIAG_STATE") {
-    void readDevDiagState().then((st) => sendResponse({ ok: true, state: st }));
-    return true;
-  }
-
-  if (msg?.type === "DEV_DIAG_ABORT") {
-    devDiagAbort = true;
-    sendResponse({ ok: true });
-    return false;
-  }
-
-  if (msg?.type === "DEV_DIAG_CLEAR") {
-    void chrome.storage.local.remove(DEV_DIAG_KEY).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-
   if (msg?.type === "ABORT_BATCH") {
     const mode = normalizeSourceMode(msg.sourceMode);
     const state = getRunState(mode);

@@ -36,10 +36,15 @@
     maxProbeFails: 2,
     maxRelearnFails: 2,
     maxMiscompares: 2,
+    maxRateLimitRetries: 3, // сколько раз переждать 429/503 по одному запросу
     opsWarehouses: [], // список опер. складов пользователя для паритета фильтра
   };
 
   const UNSUPPORTED_CHANNEL = "unsupported";
+
+  // Ответы, на которых нужно подождать и повторить, а не считать ручку сломанной.
+  const RATE_LIMIT_STATUSES = new Set([429, 503]);
+  const RATE_LIMIT_BACKOFF_MS = 500;
 
   // Номера прочитанного, на которых делаем контрольную сверку: base, потом шаг
   // удваивается до потолка (25, 75, 175, 375, 775, 1575, дальше каждые cap).
@@ -60,10 +65,17 @@
   }
 
   function delay(ms) {
-    return new Promise((resolve) => {
-      const t = setTimeout(resolve, Math.max(0, Number(ms) || 0));
-      if (t && typeof t.unref === "function") t.unref();
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  // Ожидание, которое можно снять. Нужно в гонке с чужой пробой: без отмены
+  // таймер продолжает тикать все свои полминуты, даже когда ждать уже нечего.
+  function cancellableDelay(ms) {
+    let id = null;
+    const promise = new Promise((resolve) => {
+      id = setTimeout(resolve, Math.max(0, Number(ms) || 0));
     });
+    return { promise, cancel: () => clearTimeout(id) };
   }
 
   function snapshotFromDomData(data) {
@@ -119,7 +131,12 @@
       const inFlight = probeLocks.get(String(name || "unknown"));
       if (!inFlight) return;
       // Ждём не бесконечно: если чужая проба зависла, читаем сами.
-      await Promise.race([inFlight, delay(opts.probeWaitMs)]);
+      const timer = cancellableDelay(opts.probeWaitMs);
+      try {
+        await Promise.race([inFlight, timer.promise]);
+      } finally {
+        timer.cancel();
+      }
     }
     function startProbeLock(name) {
       const key = String(name || "unknown");
@@ -197,7 +214,7 @@
     }
 
     // Один запрос к API. Возвращает { ok, body?, status, needRelearn? }.
-    async function apiGet(request) {
+    async function apiGet(request, attempt = 0) {
       if (!request || !request.url) return { ok: false, status: 0, error: "bad-request" };
       let res;
       try {
@@ -207,6 +224,15 @@
       }
       const status = Number(res?.status) || 0;
       if (status === 401 || status === 403) return { ok: false, status, needRelearn: true };
+      // 429 и 503 — не поломка ручки, а просьба притормозить. Ограничитель уже
+      // сбросил скорость вдвое; нам остаётся подождать и повторить. Считать это
+      // сбоем канала нельзя: один всплеск нагрузки выключил бы быстрое чтение
+      // целиком, и весь прогон ушёл бы на страницы.
+      if (RATE_LIMIT_STATUSES.has(status) && attempt < opts.maxRateLimitRetries) {
+        const hinted = Number(res?.retryAfterMs) || 0;
+        await delay(Math.max(hinted, RATE_LIMIT_BACKOFF_MS * Math.pow(2, attempt)));
+        return apiGet(request, attempt + 1);
+      }
       if (status !== 200 || res?.body == null) return { ok: false, status, error: "http-" + status };
       return { ok: true, status, body: res.body };
     }
@@ -275,6 +301,17 @@
       ]);
       if (!infoRes.ok) {
         return { ok: false, needRelearn: infoRes.needRelearn === true, channel: articleType, error: infoRes.error || ("http-" + infoRes.status) };
+      }
+      // Ручка может сама ответить, что объект профилю не по зубам. Страница на
+      // таком рисует информер «Неподдерживаемый тип» — отвечаем тем же, иначе
+      // получалась пустая карточка без склада, и объект уходил в ошибки.
+      if (RT.payloadSaysUnsupported(articleType, infoRes.body)) {
+        return {
+          ok: true,
+          channel: articleType,
+          articleType,
+          snapshot: RT.mapUnsupported(articleId),
+        };
       }
       // Неизвестный нам код статуса/схемы означает, что на странице будет
       // подпись, которой у нас нет — такой объект честнее дочитать страницей,

@@ -724,4 +724,60 @@ test("транзитная коробка: номенклатура берётс
   );
 });
 
+test("ручка сама сказала «не поддерживается» → закрываем как страница, без ошибки", async () => {
+  const ids = ["851348957478010", "851348957478011"];
+  const { state, deps } = makeDriver({
+    types: { [ids[0]]: "boxTransit", [ids[1]]: "boxTransit" },
+    infos: {
+      [ids[0]]: { info: null, isSupported: false },
+      [ids[1]]: { info: null, isSupported: false },
+    },
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+
+  const probe = await reader.read({ articleId: ids[0] });
+  assert.strictEqual(probe.data.unsupportedTransitBox, true);
+  assert.strictEqual(reader.getPhase("boxTransit"), "on", "тип не ломается от такого ответа");
+
+  const before = state.domCalls;
+  const next = await reader.read({ articleId: ids[1] });
+  assert.strictEqual(next.path, "api");
+  assert.strictEqual(next.data.unsupportedTransitBox, true);
+  assert.strictEqual(state.domCalls, before, "страница для этого не нужна");
+});
+
+test("429 не ломает канал: ждём и повторяем, тип остаётся включённым", async () => {
+  const ids = ["501883634205070", "501883634205071"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id);
+    contents[id] = postingContent;
+  });
+  // Первые два запроса второго объекта сервис отбивает лимитом.
+  let limited = 0;
+  const { state, deps } = makeDriver({
+    infos,
+    contents,
+    status: (url) => {
+      if (url.includes(ids[1]) && limited < 2) {
+        limited += 1;
+        return 429;
+      }
+      return 200;
+    },
+  });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
+
+  await reader.read({ articleId: ids[0] });
+  assert.strictEqual(reader.getPhase("posting"), "on");
+
+  const before = state.domCalls;
+  const r = await reader.read({ articleId: ids[1] });
+  assert.strictEqual(limited, 2, "лимит действительно сработал");
+  assert.strictEqual(r.path, "api", "после паузы дочитали через API");
+  assert.strictEqual(state.domCalls, before, "на страницу не уходили");
+  assert.strictEqual(reader.getPhase("posting"), "on", "тип не отключён из-за лимита");
+});
+
 module.exports = { tests };

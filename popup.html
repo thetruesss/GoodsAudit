@@ -624,40 +624,6 @@
               </div>
               </section>
 
-              <section class="settings-group">
-                <h3 class="settings-group-title">Диагностика (DEV)</h3>
-                <p class="settings-group-hint">
-                  Прогоняет выборку ID сразу двумя путями — через API и страницей — и
-                  складывает в JSON: сырые ответы ручек, что показала страница и из чего
-                  она собрана, расхождения поле в поле и время по этапам. Токены в файл
-                  не попадают, только имена заголовков. Прогон при этом должен быть
-                  остановлен.
-                </p>
-                <div class="field">
-                  <div class="threads-row">
-                    <label class="field-label" for="devDiagLimit">Сколько ID проверить</label>
-                    <input
-                      id="devDiagLimit"
-                      type="number"
-                      class="input input-sm threads-manual"
-                      min="1"
-                      max="60"
-                      step="1"
-                      value="20"
-                    />
-                  </div>
-                  <div class="actions">
-                    <button id="btnDevDiagRun" type="button" class="btn btn-secondary btn-sm">
-                      Собрать отчёт
-                    </button>
-                    <button id="btnDevDiagAbort" type="button" class="btn btn-ghost btn-sm" hidden>
-                      Остановить
-                    </button>
-                  </div>
-                  <p id="devDiagStatus" class="settings-group-hint" hidden></p>
-                </div>
-              </section>
-
               <section class="settings-group settings-group--danger">
                 <h3 class="settings-group-title">Сброс</h3>
               <div class="settings-cache-actions">

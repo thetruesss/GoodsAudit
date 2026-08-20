@@ -167,4 +167,44 @@ test("пул вкладок: добавленная вкладка достаё�
   assert.strictEqual(pool.size(), 2);
 });
 
+test("пейсер: 429 роняет скорость вдвое и ставит паузу", async () => {
+  const pacer = M.createRequestPacer(80, { minRps: 10, maxRps: 160 });
+  assert.strictEqual(pacer.getRate(), 80);
+  pacer.report({ status: 429, retryAfterMs: 0 });
+  assert.strictEqual(pacer.getRate(), 40, "вдвое вниз");
+  pacer.report({ status: 503 });
+  assert.strictEqual(pacer.getRate(), 20);
+  pacer.report({ status: 500 });
+  assert.strictEqual(pacer.getRate(), 10);
+  pacer.report({ status: 0 }, "обрыв тоже считается отказом");
+  assert.strictEqual(pacer.getRate(), 10, "ниже пола не опускаемся");
+  assert.strictEqual(pacer.stats().throttles, 4);
+});
+
+test("пейсер: на чистых ответах планка растёт до потолка и не выше", async () => {
+  const pacer = M.createRequestPacer(40, { maxRps: 60, stepUpRps: 5, okBeforeStepUp: 3 });
+  for (let i = 0; i < 3; i++) pacer.report({ status: 200, ms: 30 });
+  assert.strictEqual(pacer.getRate(), 45);
+  for (let i = 0; i < 30; i++) pacer.report({ status: 200, ms: 30 });
+  assert.strictEqual(pacer.getRate(), 60, "выше потолка не уходим");
+});
+
+test("пейсер: выросшие задержки останавливают разгон до отказов", async () => {
+  const pacer = M.createRequestPacer(40, { maxRps: 200, stepUpRps: 5, okBeforeStepUp: 2 });
+  pacer.report({ status: 200, ms: 30 });
+  pacer.report({ status: 200, ms: 30 });
+  assert.strictEqual(pacer.getRate(), 45, "пока быстро — разгоняемся");
+  for (let i = 0; i < 60; i++) pacer.report({ status: 200, ms: 900 });
+  assert.strictEqual(pacer.getRate(), 45, "задержки выросли — стоим, а не давим дальше");
+});
+
+test("пейсер: после 429 запросы действительно ждут паузу", async () => {
+  const pacer = M.createRequestPacer(1000, { minRps: 500 });
+  pacer.report({ status: 429, retryAfterMs: 120 });
+  const t0 = Date.now();
+  await pacer.take(1);
+  const waited = Date.now() - t0;
+  assert.ok(waited >= 100, `ждали ${waited} мс, а должны были около 120`);
+});
+
 module.exports = { tests };

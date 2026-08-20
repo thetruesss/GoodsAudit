@@ -121,19 +121,65 @@
     return { matched: "", seen: true };
   }
 
-  // Общий на все окна ограничитель нагрузки (токен-бакет, асинхронный).
-  function createRequestPacer(rps) {
-    const rate = Math.max(0, Number(rps) || 0);
+  // Общий на все окна ограничитель нагрузки. Скорость подбирается на ходу
+  // (AIMD, как в TCP): пока сервис отвечает чисто и в обычном темпе, планка
+  // растёт, а на 429, 5xx или обрыве — сразу вдвое вниз и пауза. Так предел
+  // сервиса находится сам, вместо константы, угаданной наугад.
+  function createRequestPacer(rps, opts = {}) {
+    const start = Math.max(0, Number(rps) || 0);
+    const floor = Math.max(1, Number(opts.minRps) || 8);
+    const ceiling = Math.max(start, Number(opts.maxRps) || start);
+    const stepUp = Math.max(1, Number(opts.stepUpRps) || 5);
+    const okBeforeStepUp = Math.max(1, Number(opts.okBeforeStepUp) || 40);
+    const st = { rate: start, okStreak: 0, pauseUntil: 0, throttles: 0, ema: 0, best: 0 };
     let nextFree = 0;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
     return {
+      getRate: () => Math.round(st.rate),
+      stats: () => ({
+        rps: Math.round(st.rate),
+        throttles: st.throttles,
+        latencyMs: Math.round(st.ema),
+      }),
       async take(n = 1) {
-        if (rate <= 0) return;
-        const cost = (Math.max(1, Math.floor(n)) / rate) * 1000;
+        if (st.rate <= 0) return;
+        const held = st.pauseUntil - Date.now();
+        if (held > 0) await sleep(held);
+        const cost = (Math.max(1, Math.floor(n)) / st.rate) * 1000;
         const now = Date.now();
-        const start = Math.max(now, nextFree);
-        nextFree = start + cost;
-        const wait = start - now;
-        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        const at = Math.max(now, nextFree);
+        nextFree = at + cost;
+        const wait = at - now;
+        if (wait > 0) await sleep(wait);
+      },
+      // Ответ сервиса — единственный честный источник того, сколько он готов
+      // держать. 429 и 5xx означают «слишком быстро»: планка сразу пополам и
+      // пауза. Пока же ответы чистые и в обычном темпе, планка растёт.
+      report({ status = 0, ms = 0, retryAfterMs = 0 } = {}) {
+        if (st.rate <= 0) return;
+        const pushback = status === 429 || status === 0 || (status >= 500 && status <= 599);
+        if (pushback) {
+          st.throttles += 1;
+          st.okStreak = 0;
+          st.rate = Math.max(floor, st.rate / 2);
+          st.pauseUntil = Math.max(st.pauseUntil, Date.now() + Math.max(Number(retryAfterMs) || 0, 400));
+          nextFree = Math.max(nextFree, st.pauseUntil);
+          return;
+        }
+        const dur = Number(ms) || 0;
+        if (dur > 0) {
+          st.ema = st.ema > 0 ? st.ema * 0.9 + dur * 0.1 : dur;
+          st.best = st.best > 0 ? Math.min(st.best, dur) : dur;
+        }
+        st.okStreak += 1;
+        // Выросшие втрое задержки — первый признак, что сервису тяжело, ещё до
+        // ошибок. Тогда просто стоим на месте, а не разгоняемся дальше.
+        const strained = st.best > 0 && st.ema > st.best * 3;
+        if (!strained && st.okStreak >= okBeforeStepUp && st.rate < ceiling) {
+          st.rate = Math.min(ceiling, st.rate + stepUp);
+          st.okStreak = 0;
+        }
       },
     };
   }

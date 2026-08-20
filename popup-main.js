@@ -2717,66 +2717,6 @@ const API_CHANNEL_TITLES = {
   off: "быстрое чтение",
 };
 
-function apiChannelTitle(name) {
-  const key = String(name || "");
-  if (API_CHANNEL_TITLES[key]) return API_CHANNEL_TITLES[key];
-  if (key.startsWith("unsupported:")) return `неподдерживаемый тип «${key.slice(12)}»`;
-  return key;
-}
-
-// Почему быстрое чтение не ускорило прогон: показываем путь чтения и причину,
-// по которой тип вернулся на страницы (с конкретными расхождениями).
-function formatApiDiagnostics(job) {
-  const stats = job?.readStats;
-  const channels = job?.apiChannels;
-  const fallbacks = job?.apiFallbacks;
-  if (!stats && !channels) return "";
-  const lines = [];
-  const api = Math.max(0, Number(stats?.api) || 0);
-  const dom = Math.max(0, Number(stats?.dom) || 0);
-  if (api + dom > 0) {
-    lines.push(`\nБыстрое чтение: через API ${api}, страницей ${dom}.`);
-  }
-  // Почему читали страницей — с частотой каждой причины.
-  if (Array.isArray(fallbacks) && fallbacks.length) {
-    const parts = fallbacks
-      .filter((f) => f && f.reason)
-      .map((f) => `${f.reason} — ${Math.max(0, Number(f.count) || 0)}`);
-    if (parts.length) lines.push(`Причины чтения страницей: ${parts.join("; ")}.`);
-  }
-  if (channels && typeof channels === "object") {
-    for (const [name, info] of Object.entries(channels)) {
-      if (!info) continue;
-      const title = apiChannelTitle(name);
-      const samples = Array.isArray(info.samples) ? info.samples : [];
-      const detail = samples.length
-        ? samples.map((s) => `${s.field}: API «${s.api}» ≠ страница «${s.dom}»`).join("; ")
-        : info.reason || info.lastError || "";
-      if (info.phase === "on") {
-        // Тип работает, но если по пути были расхождения — показываем их:
-        // такие объекты читаются страницей, то есть тормозят прогон.
-        if (samples.length) {
-          lines.push(`API работает (${title}), но были расхождения: ${detail}`);
-        }
-        continue;
-      }
-      if (info.phase === "off") {
-        lines.push(`API отключён (${title}): ${detail || "сбой чтения"}`);
-      } else if (detail) {
-        // Канал ещё проверяется — но причина, по которой он не включился,
-        // важнее молчания: без неё непонятно, почему нет ускорения.
-        lines.push(`API проверяется (${title}): ${detail}`);
-      } else {
-        lines.push(`API проверяется (${title}): сверка со страницей ещё идёт`);
-      }
-      if (Array.isArray(info.learned) && info.learned.length) {
-        lines.push(`Выучены подписи: ${info.learned.join("; ")}`);
-      }
-    }
-  }
-  return lines.length ? lines.join("\n") : "";
-}
-
 function formatStatus(job) {
   if (!job) {
     return [
@@ -2831,8 +2771,6 @@ function formatStatus(job) {
     );
   }
   if (job.sourceName) lines.push(`\nФайл: ${job.sourceName}`);
-  const apiDiag = formatApiDiagnostics(job);
-  if (apiDiag) lines.push(`\n${apiDiag.replace(/^\n/, "")}`);
   if (job.phase === "done" || job.phase === "aborted") {
     if (job.errors?.length) {
       const shown = job.errors.slice(0, MAX_STATUS_DETAIL_LINES);
@@ -5268,128 +5206,6 @@ async function clearAllExtensionCache() {
   await refresh();
   showAppToast("Кэш очищен. Расширение сброшено.", 3200);
 }
-
-// --- DEV-диагностика ---------------------------------------------------------
-// Прогоняет выборку ID обоими путями и отдаёт JSON, по которому расхождения и
-// затраты времени видно целиком, а не по одной строке статистики.
-let devDiagPollTimer = null;
-
-function setDevDiagStatus(text, busy) {
-  const el = $("devDiagStatus");
-  if (el) {
-    el.textContent = String(text || "");
-    el.hidden = !text;
-  }
-  const run = $("btnDevDiagRun");
-  const abort = $("btnDevDiagAbort");
-  if (run) run.disabled = Boolean(busy);
-  if (abort) abort.hidden = !busy;
-}
-
-function downloadDevDiagReport(report) {
-  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  link.href = url;
-  link.download = `goodsaudit-dev-diag-${stamp}.json`;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
-function stopDevDiagPolling() {
-  if (devDiagPollTimer != null) {
-    clearInterval(devDiagPollTimer);
-    devDiagPollTimer = null;
-  }
-}
-
-async function pollDevDiagOnce() {
-  let res;
-  try {
-    res = await chrome.runtime.sendMessage({ type: "DEV_DIAG_STATE" });
-  } catch {
-    return;
-  }
-  const st = res?.state;
-  if (!st) {
-    stopDevDiagPolling();
-    setDevDiagStatus("", false);
-    return;
-  }
-  if (st.phase === "running") {
-    const at = st.currentArticleId ? ` · ${st.currentArticleId}` : "";
-    setDevDiagStatus(`Собираю: ${st.done || 0} из ${st.total || "?"}${at}`, true);
-    return;
-  }
-  stopDevDiagPolling();
-  if (st.phase === "error") {
-    setDevDiagStatus("", false);
-    showAppToast(`Диагностика: ${st.error || "ошибка"}`, 4200);
-  } else if (st.report) {
-    const t = st.report.totals || {};
-    downloadDevDiagReport(st.report);
-    setDevDiagStatus(
-      `Готово: ${t.items || 0} объектов, расхождений в ${t.itemsWithDiff || 0}. ` +
-        `Страница ~${t.domAvgMs || 0} мс, API ~${t.apiAvgMs || 0} мс на объект.`,
-      false
-    );
-  } else {
-    setDevDiagStatus("", false);
-  }
-  try {
-    await chrome.runtime.sendMessage({ type: "DEV_DIAG_CLEAR" });
-  } catch {}
-}
-
-function startDevDiagPolling() {
-  stopDevDiagPolling();
-  devDiagPollTimer = setInterval(() => void pollDevDiagOnce(), 700);
-  void pollDevDiagOnce();
-}
-
-$("btnDevDiagRun")?.addEventListener("click", () => {
-  void (async () => {
-    const sourceText = getActiveSourceText();
-    if (!sourceText) {
-      showAppToast("Сначала вставьте ID или выберите файл.", 3200);
-      return;
-    }
-    const limit = Math.max(1, Math.min(60, Number($("devDiagLimit")?.value) || 20));
-    setDevDiagStatus("Запускаю…", true);
-    let res;
-    try {
-      res = await chrome.runtime.sendMessage({
-        type: "DEV_DIAG_START",
-        sourceText,
-        sourceFromCache: true,
-        sourceMode: getActiveModeKey(),
-        opsWarehouses: getOpsWarehousesList(),
-        limit,
-      });
-    } catch (err) {
-      setDevDiagStatus("", false);
-      showAppToast(`Диагностика: ${String(err?.message || err)}`, 4200);
-      return;
-    }
-    if (!res?.ok) {
-      setDevDiagStatus("", false);
-      showAppToast(res?.error || "Не удалось запустить диагностику.", 4200);
-      return;
-    }
-    startDevDiagPolling();
-  })();
-});
-
-$("btnDevDiagAbort")?.addEventListener("click", () => {
-  void chrome.runtime.sendMessage({ type: "DEV_DIAG_ABORT" }).catch(() => {});
-});
-
-// Попап могли закрыть посреди сбора — подхватываем, что там осталось.
-void pollDevDiagOnce().then(() => {
-  const el = $("devDiagStatus");
-  if (el && !el.hidden && el.textContent.startsWith("Собираю")) startDevDiagPolling();
-});
 
 $("btnClearAllCache")?.addEventListener("click", () => {
   void (async () => {
