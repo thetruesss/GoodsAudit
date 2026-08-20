@@ -3377,6 +3377,20 @@ function applyApiReadToDom() {
   if (toggle.checked !== on) toggle.checked = on;
 }
 
+// Настройки могли сохраниться до того, как режимы стали взаимоисключающими:
+// тогда на экране оказались бы включены оба. Приводим к одному — быстрое
+// чтение важнее, ради него агрессивный режим почти не нужен.
+function reconcileExclusiveModes() {
+  if (outputPrefs.apiReadEnabled === false) return;
+  if (outputPrefs.aggressiveMode !== true) return;
+  outputPrefs.aggressiveMode = false;
+  const toggle = $("aggressiveModeToggle");
+  if (toggle && toggle.checked) {
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
 function applyHyperlinksToDom() {
   const on = areHyperlinksEnabled();
   const toggle = $("hyperlinksToggle");
@@ -3406,6 +3420,7 @@ function applyOutputPrefsToUi(opts = {}) {
   applyAggressiveModeToDom();
   applyExcludeMemoryIdsToDom();
   applyApiReadToDom();
+  reconcileExclusiveModes();
   applyHyperlinksToDom();
   refreshThresholdDependentLabels();
   const settingsOpen = $("panelSettings") && !$("panelSettings").hidden;
@@ -5206,6 +5221,140 @@ async function clearAllExtensionCache() {
   await refresh();
   showAppToast("Кэш очищен. Расширение сброшено.", 3200);
 }
+
+// --- Тумблеры: перетаскивание -----------------------------------------------
+// Тумблер можно не только кликнуть, но и потянуть: ползунок идёт за пальцем, а
+// на отпускании прилипает к ближайшему краю. Обычный клик при этом остаётся
+// штатным — его обрабатывает сам label, и подменять это поведение незачем.
+const SWITCH_TRAVEL_PX = 24; // на столько ползунок ездит в CSS
+
+function initSwitchDragging(root) {
+  const host = root || document;
+  let drag = null;
+  let swallowClick = false;
+
+  const trackOf = (sw) => sw.querySelector(".ui-switch-track");
+  const inputOf = (sw) => sw.querySelector("input[type='checkbox']");
+
+  function paint(sw, ratio) {
+    const track = trackOf(sw);
+    if (!track) return;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    track.style.setProperty("--knob-x", `${(clamped * 2 - 1) * SWITCH_TRAVEL_PX}px`);
+    track.style.backgroundColor = `color-mix(in srgb, var(--oz-blue) ${Math.round(
+      clamped * 100
+    )}%, #cfd6de)`;
+  }
+
+  function releaseStyles(sw) {
+    const track = trackOf(sw);
+    if (!track) return;
+    track.style.removeProperty("--knob-x");
+    track.style.removeProperty("background-color");
+  }
+
+  host.addEventListener("pointerdown", (event) => {
+    swallowClick = false;
+    if (event.button !== 0) return;
+    const sw = event.target?.closest?.(".ui-switch");
+    if (!sw) return;
+    const input = inputOf(sw);
+    if (!input || input.disabled) return;
+    drag = { sw, input, startX: event.clientX, from: input.checked, to: input.checked, moved: false, pointerId: event.pointerId };
+  });
+
+  host.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    // Пара пикселей дрожания — это ещё клик, а не перетаскивание.
+    if (!drag.moved && Math.abs(dx) < 3) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      drag.sw.classList.add("is-dragging");
+    }
+    const base = drag.from ? SWITCH_TRAVEL_PX : -SWITCH_TRAVEL_PX;
+    const x = Math.max(-SWITCH_TRAVEL_PX, Math.min(SWITCH_TRAVEL_PX, base + dx));
+    drag.to = x > 0;
+    paint(drag.sw, (x + SWITCH_TRAVEL_PX) / (SWITCH_TRAVEL_PX * 2));
+  });
+
+  function finishDrag() {
+    if (!drag) return;
+    const { sw, input, moved, to, from } = drag;
+    drag = null;
+    sw.classList.remove("is-dragging");
+    releaseStyles(sw);
+    if (!moved) return;
+    // После перетаскивания клик по label только вернул бы всё обратно.
+    swallowClick = true;
+    if (to !== from) {
+      input.checked = to;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
+  host.addEventListener("pointerup", finishDrag);
+  host.addEventListener("pointercancel", finishDrag);
+
+  host.addEventListener(
+    "click",
+    (event) => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      if (!event.target?.closest?.(".ui-switch")) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    true
+  );
+}
+
+// --- Сворачивающийся раздел настроек -----------------------------------------
+function initCollapsibleGroup(sectionId, toggleId) {
+  const section = $(sectionId);
+  const button = $(toggleId);
+  if (!section || !button) return;
+  const body = section.querySelector(".settings-group-body");
+  const inner = section.querySelector(".settings-group-body-inner");
+
+  const setOpen = (open) => {
+    section.classList.toggle("is-open", open);
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    // Пока едет анимация — режем содержимое. Обрезку снимаем только когда
+    // раздел открылся до конца, иначе она обрубает подсказки «?».
+    if (!open) inner?.classList.remove("is-visible");
+  };
+
+  body?.addEventListener("transitionend", (event) => {
+    if (event.propertyName !== "grid-template-rows") return;
+    if (section.classList.contains("is-open")) inner?.classList.add("is-visible");
+  });
+
+  button.addEventListener("click", () => setOpen(!section.classList.contains("is-open")));
+  setOpen(false);
+}
+
+// --- Быстрое чтение и агрессивный режим — только по одному --------------------
+// Агрессивный режим форсирует вкладки и окно парсинга, а при быстром чтении
+// страницы почти не открываются: вместе они друг другу мешают. Поэтому
+// включение одного гасит другой.
+function setToggleChecked(id, value) {
+  const el = $(id);
+  if (!el || el.checked === value) return;
+  el.checked = value;
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+$("apiReadToggle")?.addEventListener("change", () => {
+  if ($("apiReadToggle")?.checked) setToggleChecked("aggressiveModeToggle", false);
+});
+
+$("aggressiveModeToggle")?.addEventListener("change", () => {
+  if ($("aggressiveModeToggle")?.checked) setToggleChecked("apiReadToggle", false);
+});
+
+initSwitchDragging(document);
+initCollapsibleGroup("behaviorGroup", "behaviorGroupToggle");
 
 $("btnClearAllCache")?.addEventListener("click", () => {
   void (async () => {
