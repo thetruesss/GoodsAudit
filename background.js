@@ -544,6 +544,7 @@ async function waitForDataMarkers(
 ) {
   
   const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
   while (Date.now() < deadline) {
     while (isPauseRequested() && !isAbortRequested()) {
       await sleep(120);
@@ -574,7 +575,13 @@ async function waitForDataMarkers(
       return hasClassic || hasTransitBox || hasInstancePage || hasC2C;
     });
     if (Boolean(results?.[0]?.result)) return true;
-    await sleep(250);
+    // Первую секунду опрашиваем часто. По замерам данные появляются раньше,
+    // чем через 250 мс, и на грубом шаге мы теряли этот интервал целиком на
+    // каждом чтении: медиана ожидания маркеров была ровно 255 мс, то есть
+    // один впустую проспанный шаг. Дальше шаг растёт — страницу, которая всё
+    // равно не готова, долбить незачем.
+    const waited = Date.now() - startedAt;
+    await sleep(waited < 1000 ? 45 : waited < 4000 ? 150 : 400);
   }
   return false;
 }
@@ -2768,6 +2775,15 @@ async function runDevDiagnostics(msg) {
         ]);
         info = infoRes?.body ?? null;
         content = contentRes?.body ?? null;
+      }
+      // Перевозку спрашиваем по тому же условию, что и рабочее чтение: только
+      // когда текущее место не наше. Иначе отчёт завышал бы число запросов на
+      // объект — а это и есть предел скорости.
+      const preSnapshot = rec.api.supported
+        ? RT.mapByType(articleType, info, content)
+        : RT.mapUnsupported(apiId);
+      const preOps = M.resolveOpsWarehouse(preSnapshot?.operationalWarehouse, opsWarehouses);
+      if (rec.api.supported && opsWarehouses.length && !preOps.matched) {
         await devApiCall(
           tabId,
           RT.lastCarriageRequest(articleType, apiId),
@@ -2779,13 +2795,13 @@ async function runDevDiagnostics(msg) {
 
       // 5) Наш маппинг: что мы из этого собираем и что мешает включиться.
       rec.api.unknownCodes = rec.api.supported ? RT.unknownCodesInInfo(articleType, info) : [];
-      const snapshot = rec.api.supported ? RT.mapByType(articleType, info, content) : RT.mapUnsupported(apiId);
+      const snapshot = preSnapshot;
       rec.api.snapshot = snapshot;
       if (snapshot) {
         // Склад считаем ровно как рабочее чтение: не нашли наш в текущем месте —
-        // ищем в последней перевозке. Иначе отчёт показывал бы расхождения,
-        // которых в прогоне нет.
-        let ops = M.resolveOpsWarehouse(snapshot.operationalWarehouse, opsWarehouses);
+        // берём его из последней перевозки. Иначе отчёт показывал бы
+        // расхождения, которых в прогоне нет.
+        let ops = preOps;
         if (!ops.matched && opsWarehouses.length && rec.api.supported) {
           const carriage = (rec.api.requests || []).find((q) => /last-carriage/.test(q.url));
           for (const place of RT.carriagePlaceNames(carriage?.body)) {
