@@ -114,4 +114,57 @@ test("машина состояний: расхождения на сверке 
   assert.strictEqual(c.getReason(), "verify-mismatch");
 });
 
+test("пул вкладок: выдаёт свободные, лишние ждут очереди", async () => {
+  const pool = M.createTabPool([11, 22]);
+  const a = await pool.acquire();
+  const b = await pool.acquire();
+  assert.deepStrictEqual([a, b], [11, 22]);
+  assert.strictEqual(pool.free(), 0);
+
+  let third = null;
+  const waiting = pool.acquire().then((id) => (third = id));
+  await Promise.resolve();
+  assert.strictEqual(third, null, "третий ждёт, а не берёт несуществующую вкладку");
+  assert.strictEqual(pool.waiting(), 1);
+
+  pool.release(a);
+  await waiting;
+  assert.strictEqual(third, 11, "освободившаяся вкладка уходит ожидающему");
+  assert.strictEqual(pool.free(), 0, "мимо очереди в свободные она не попадает");
+});
+
+test("пул вкладок: повторный release не размножает вкладку", async () => {
+  const pool = M.createTabPool([7]);
+  const id = await pool.acquire();
+  pool.release(id);
+  pool.release(id);
+  assert.strictEqual(pool.free(), 1);
+  assert.strictEqual(await pool.acquire(), 7);
+  assert.strictEqual(pool.free(), 0);
+});
+
+test("пул вкладок: зависшая вкладка меняется на свежую", async () => {
+  const pool = M.createTabPool([1, 2]);
+  const bad = await pool.acquire();
+  pool.replace(bad, 99);
+  pool.release(99);
+  assert.deepStrictEqual(pool.all().sort((x, y) => x - y), [2, 99]);
+  assert.strictEqual(pool.size(), 2, "вкладок не стало больше");
+  pool.release(bad);
+  assert.strictEqual(pool.free(), 2, "мёртвая вкладка обратно в пул не возвращается");
+});
+
+test("пул вкладок: добавленная вкладка достаётся ожидающему", async () => {
+  const pool = M.createTabPool([5]);
+  await pool.acquire();
+  let got = null;
+  const waiting = pool.acquire().then((id) => (got = id));
+  await Promise.resolve();
+  assert.strictEqual(got, null);
+  pool.add(6);
+  await waiting;
+  assert.strictEqual(got, 6);
+  assert.strictEqual(pool.size(), 2);
+});
+
 module.exports = { tests };
