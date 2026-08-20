@@ -5269,6 +5269,128 @@ async function clearAllExtensionCache() {
   showAppToast("Кэш очищен. Расширение сброшено.", 3200);
 }
 
+// --- DEV-диагностика ---------------------------------------------------------
+// Прогоняет выборку ID обоими путями и отдаёт JSON, по которому расхождения и
+// затраты времени видно целиком, а не по одной строке статистики.
+let devDiagPollTimer = null;
+
+function setDevDiagStatus(text, busy) {
+  const el = $("devDiagStatus");
+  if (el) {
+    el.textContent = String(text || "");
+    el.hidden = !text;
+  }
+  const run = $("btnDevDiagRun");
+  const abort = $("btnDevDiagAbort");
+  if (run) run.disabled = Boolean(busy);
+  if (abort) abort.hidden = !busy;
+}
+
+function downloadDevDiagReport(report) {
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  link.href = url;
+  link.download = `goodsaudit-dev-diag-${stamp}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function stopDevDiagPolling() {
+  if (devDiagPollTimer != null) {
+    clearInterval(devDiagPollTimer);
+    devDiagPollTimer = null;
+  }
+}
+
+async function pollDevDiagOnce() {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: "DEV_DIAG_STATE" });
+  } catch {
+    return;
+  }
+  const st = res?.state;
+  if (!st) {
+    stopDevDiagPolling();
+    setDevDiagStatus("", false);
+    return;
+  }
+  if (st.phase === "running") {
+    const at = st.currentArticleId ? ` · ${st.currentArticleId}` : "";
+    setDevDiagStatus(`Собираю: ${st.done || 0} из ${st.total || "?"}${at}`, true);
+    return;
+  }
+  stopDevDiagPolling();
+  if (st.phase === "error") {
+    setDevDiagStatus("", false);
+    showAppToast(`Диагностика: ${st.error || "ошибка"}`, 4200);
+  } else if (st.report) {
+    const t = st.report.totals || {};
+    downloadDevDiagReport(st.report);
+    setDevDiagStatus(
+      `Готово: ${t.items || 0} объектов, расхождений в ${t.itemsWithDiff || 0}. ` +
+        `Страница ~${t.domAvgMs || 0} мс, API ~${t.apiAvgMs || 0} мс на объект.`,
+      false
+    );
+  } else {
+    setDevDiagStatus("", false);
+  }
+  try {
+    await chrome.runtime.sendMessage({ type: "DEV_DIAG_CLEAR" });
+  } catch {}
+}
+
+function startDevDiagPolling() {
+  stopDevDiagPolling();
+  devDiagPollTimer = setInterval(() => void pollDevDiagOnce(), 700);
+  void pollDevDiagOnce();
+}
+
+$("btnDevDiagRun")?.addEventListener("click", () => {
+  void (async () => {
+    const sourceText = getActiveSourceText();
+    if (!sourceText) {
+      showAppToast("Сначала вставьте ID или выберите файл.", 3200);
+      return;
+    }
+    const limit = Math.max(1, Math.min(60, Number($("devDiagLimit")?.value) || 20));
+    setDevDiagStatus("Запускаю…", true);
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({
+        type: "DEV_DIAG_START",
+        sourceText,
+        sourceFromCache: true,
+        sourceMode: getActiveModeKey(),
+        opsWarehouses: getOpsWarehousesList(),
+        limit,
+      });
+    } catch (err) {
+      setDevDiagStatus("", false);
+      showAppToast(`Диагностика: ${String(err?.message || err)}`, 4200);
+      return;
+    }
+    if (!res?.ok) {
+      setDevDiagStatus("", false);
+      showAppToast(res?.error || "Не удалось запустить диагностику.", 4200);
+      return;
+    }
+    startDevDiagPolling();
+  })();
+});
+
+$("btnDevDiagAbort")?.addEventListener("click", () => {
+  void chrome.runtime.sendMessage({ type: "DEV_DIAG_ABORT" }).catch(() => {});
+});
+
+// Попап могли закрыть посреди сбора — подхватываем, что там осталось.
+void pollDevDiagOnce().then(() => {
+  const el = $("devDiagStatus");
+  if (el && !el.hidden && el.textContent.startsWith("Собираю")) startDevDiagPolling();
+});
+
 $("btnClearAllCache")?.addEventListener("click", () => {
   void (async () => {
     const password = await askAppInput({

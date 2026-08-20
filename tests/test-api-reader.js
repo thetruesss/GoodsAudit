@@ -694,7 +694,7 @@ test("шаг контрольной сверки растёт: сначала ч
   assert.deepStrictEqual(domAt, [1, 2, 6, 14, 22, 30]);
 });
 
-test("транзитная коробка: номенклатура как на странице, состав не запрашиваем", async () => {
+test("транзитная коробка: номенклатура берётся из состава, как на странице", async () => {
   const id = "851348957478001";
   const { state, deps } = makeDriver({
     types: { [id]: "boxTransit" },
@@ -711,21 +711,16 @@ test("транзитная коробка: номенклатура как на 
         statuses: { lozonState: "banded", returnStatus: "utilization" },
       },
     },
-    // Состав у коробки есть, но страница показывает не его.
     contents: { [id]: { exemplars: [{ modelName: "Шкаф для одежды распашной 2113" }] } },
   });
   const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
 
   const probe = await reader.read({ articleId: id });
-  assert.strictEqual(probe.data.nomenclature, "Транзитная коробка");
-  assert.strictEqual(
-    reader.getPhase("boxTransit"),
-    "on",
-    "сверка со страницей сходится — тип включается"
-  );
+  assert.strictEqual(probe.data.nomenclature, "Шкаф для одежды распашной 2113");
+  assert.strictEqual(reader.getPhase("boxTransit"), "on");
   assert.ok(
-    !state.urls.some((u) => u.includes("/content/")),
-    "лишнего запроса состава коробки нет"
+    state.urls.some((u) => u.includes("TransitBox/content/")),
+    "состав коробки запрашивается"
   );
 });
 
