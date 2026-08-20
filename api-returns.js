@@ -223,6 +223,30 @@
     }
   }
 
+  // Последняя перевозка: на странице это отдельный блок, и DOM-скрейпер умеет
+  // найти в нём наш опер. склад, когда текущее место — не наше.
+  function lastCarriageRequest(articleType, articleId) {
+    const id = encodeURIComponent(String(articleId ?? "").trim());
+    switch (String(articleType || "").trim()) {
+      case "posting":
+        return { method: "GET", url: `${API_BASE}/Posting/last-carriage/${id}` };
+      case "exemplar":
+        return { method: "GET", url: `${API_BASE}/Exemplar/last-carriage/${id}` };
+      case "boxTransit":
+        return { method: "GET", url: `${API_BASE}/TransitBox/last-carriage/${id}` };
+      default:
+        return null;
+    }
+  }
+
+  // Имена мест из последней перевозки — то, что видит скрейпер в её таблице.
+  function carriagePlaceNames(carriage) {
+    if (!carriage || typeof carriage !== "object") return [];
+    return [carriage.sourcePlaceName, carriage.destinationPlaceName]
+      .map((x) => text(x))
+      .filter(Boolean);
+  }
+
   // Номенклатура лежит отдельной ручкой — на странице это таблица «Состав».
   function contentRequest(articleType, articleId) {
     const id = encodeURIComponent(String(articleId ?? "").trim());
@@ -472,6 +496,8 @@
     resolveTypeRequest,
     infoRequest,
     contentRequest,
+    lastCarriageRequest,
+    carriagePlaceNames,
     firstNomenclature,
     emptySnapshot,
     mapUnsupported,

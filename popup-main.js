@@ -2746,12 +2746,20 @@ function formatApiDiagnostics(job) {
   }
   if (channels && typeof channels === "object") {
     for (const [name, info] of Object.entries(channels)) {
-      if (!info || info.phase === "on") continue;
+      if (!info) continue;
       const title = apiChannelTitle(name);
       const samples = Array.isArray(info.samples) ? info.samples : [];
       const detail = samples.length
         ? samples.map((s) => `${s.field}: API «${s.api}» ≠ страница «${s.dom}»`).join("; ")
         : info.reason || info.lastError || "";
+      if (info.phase === "on") {
+        // Тип работает, но если по пути были расхождения — показываем их:
+        // такие объекты читаются страницей, то есть тормозят прогон.
+        if (samples.length) {
+          lines.push(`API работает (${title}), но были расхождения: ${detail}`);
+        }
+        continue;
+      }
       if (info.phase === "off") {
         lines.push(`API отключён (${title}): ${detail || "сбой чтения"}`);
       } else if (detail) {

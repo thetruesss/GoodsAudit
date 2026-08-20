@@ -82,6 +82,7 @@ function makeDriver(opts = {}) {
     types: opts.types || {}, // articleId → articleType
     infos: opts.infos || {}, // articleId → info payload
     contents: opts.contents || {},
+    carriages: opts.carriages || {}, // articleId → последняя перевозка
     status: opts.status || (() => 200),
     domOverride: opts.domOverride || null,
     opsWarehouses: opts.opsWarehouses || [],
@@ -103,7 +104,18 @@ function makeDriver(opts = {}) {
       state.domCalls += 1;
       const id = String(item.articleId);
       const raw = apiSnapshotFor(id);
-      const ops = M.resolveOpsWarehouse(raw.operationalWarehouse, state.opsWarehouses);
+      let ops = M.resolveOpsWarehouse(raw.operationalWarehouse, state.opsWarehouses);
+      // Так же, как настоящий скрейпер: не нашли наш склад в «Текущем месте» —
+      // ищем его в блоке «Последняя перевозка».
+      if (!ops.matched && state.opsWarehouses.length) {
+        for (const place of RT.carriagePlaceNames(state.carriages[id])) {
+          const hit = M.resolveOpsWarehouse(place, state.opsWarehouses);
+          if (hit.matched) {
+            ops = { matched: hit.matched, seen: true };
+            break;
+          }
+        }
+      }
       const withOps = Object.assign({}, raw, {
         operationalWarehouse: ops.matched,
         operationalWarehouseSeen: ops.seen,
@@ -132,6 +144,8 @@ function makeDriver(opts = {}) {
       }
       const infoMatch = req.url.match(/\/(Posting|Exemplar|TransitBox)\/info\?id=(\d+)/);
       if (infoMatch) return { status: 200, body: state.infos[infoMatch[2]] };
+      const carriageMatch = req.url.match(/last-carriage\/(\d+)/);
+      if (carriageMatch) return { status: 200, body: state.carriages[carriageMatch[1]] || null };
       const contentMatch = req.url.match(/(posting-content|TransitBox\/content)\/(\d+)/);
       if (contentMatch) return { status: 200, body: state.contents[contentMatch[2]] || { exemplars: [] } };
       return { status: 404, body: null };
@@ -149,7 +163,7 @@ function makeDriver(opts = {}) {
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
-test("posting: 2 сверки с DOM → тип включается, дальше только API", async () => {
+test("posting: одна сверка с DOM → тип включается, дальше только API", async () => {
   const ids = ["501883634205001", "501883634205002", "501883634205003"];
   const infos = {};
   const contents = {};
@@ -162,13 +176,13 @@ test("posting: 2 сверки с DOM → тип включается, дальш
 
   const r1 = await reader.read({ articleId: ids[0] });
   assert.strictEqual(r1.path, "dom", "первая сверка — данные со страницы");
-  const r2 = await reader.read({ articleId: ids[1] });
-  assert.strictEqual(r2.path, "dom", "вторая сверка — данные со страницы");
-  assert.strictEqual(reader.getPhase("posting"), "on", "тип подтверждён");
+  assert.strictEqual(reader.getPhase("posting"), "on", "тип подтверждён одной сверкой");
 
   const domCallsBefore = state.domCalls;
+  const r2 = await reader.read({ articleId: ids[1] });
   const r3 = await reader.read({ articleId: ids[2] });
-  assert.strictEqual(r3.path, "api", "дальше читаем через API");
+  assert.strictEqual(r2.path, "api", "дальше читаем через API");
+  assert.strictEqual(r3.path, "api");
   assert.strictEqual(state.domCalls, domCallsBefore, "страница больше не открывается");
   assert.strictEqual(r3.data.price, 9877);
   assert.strictEqual(r3.data.statusLozon, "Недостача");
@@ -199,31 +213,35 @@ test("неподдерживаемый тип: закрывается без о�
   const { state, deps } = makeDriver({ types });
   const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
   await reader.read({ articleId: ids[0] });
-  await reader.read({ articleId: ids[1] });
-  assert.strictEqual(reader.getPhase("unsupported:pallet"), "on");
+  assert.strictEqual(reader.getPhase("unsupported"), "on");
   const before = state.domCalls;
-  const r = await reader.read({ articleId: ids[2] });
+  const r = await reader.read({ articleId: ids[1] });
   assert.strictEqual(r.path, "api");
   assert.strictEqual(state.domCalls, before, "страница не открывалась");
   assert.strictEqual(r.data.unsupportedTransitBox, true);
 });
 
-test("каждый неподдерживаемый тип подтверждается отдельно", async () => {
-  const palletIds = ["900000001001", "900000001002", "900000001003"];
+test("неподдерживаемые типы идут одним каналом: подтверждение общее", async () => {
+  // Профиль карточки рисует «Неподдерживаемый тип» всему, что вне трёх типов,
+  // поэтому механизм один — проверять его на каждый тип отдельно значит
+  // впустую грузить страницы.
+  const palletId = "900000001001";
   const sackId = "900000002001";
-  const types = { [sackId]: "sack" };
-  palletIds.forEach((id) => (types[id] = "pallet"));
+  const boxId = "900000003001";
+  const types = { [palletId]: "pallet", [sackId]: "sack", [boxId]: "boxTare" };
   const { state, deps } = makeDriver({ types });
   const reader = R.createHubApiReader(deps, { verifyEveryN: 0 });
-  await reader.read({ articleId: palletIds[0] });
-  await reader.read({ articleId: palletIds[1] });
-  assert.strictEqual(reader.getPhase("unsupported:pallet"), "on");
-  // Другой неподдерживаемый тип ещё не проверялся — его нельзя закрывать молча.
-  assert.strictEqual(reader.getPhase("unsupported:sack"), "probe");
+  const first = await reader.read({ articleId: palletId });
+  assert.strictEqual(first.path, "dom", "первая сверка со страницей");
+  assert.strictEqual(reader.getPhase("unsupported"), "on");
+
   const before = state.domCalls;
-  const r = await reader.read({ articleId: sackId });
-  assert.strictEqual(r.path, "dom", "новый тип сначала сверяется со страницей");
-  assert.strictEqual(state.domCalls, before + 1);
+  const r1 = await reader.read({ articleId: sackId });
+  const r2 = await reader.read({ articleId: boxId });
+  assert.strictEqual(r1.path, "api", "другой неподдерживаемый тип уже без страницы");
+  assert.strictEqual(r2.path, "api");
+  assert.strictEqual(state.domCalls, before, "лишних загрузок страницы нет");
+  assert.strictEqual(r1.data.unsupportedTransitBox, true);
 });
 
 test("сломанная ручка деталей отключает тип, а не крутится вечно", async () => {
@@ -400,9 +418,8 @@ test("общее состояние: второй поток не пробует
   const readerA = R.createHubApiReader(a.deps, { verifyEveryN: 0, ...shared });
   const readerB = R.createHubApiReader(b.deps, { verifyEveryN: 0, ...shared });
 
-  // Первый поток проходит обе пробы...
+  // Первый поток проходит пробу...
   await readerA.read({ articleId: ids[0] });
-  await readerA.read({ articleId: ids[1] });
   assert.strictEqual(readerA.getPhase("posting"), "on");
   // ...а второй сразу читает через API, не открывая страницу заново.
   assert.strictEqual(readerB.getPhase("posting"), "on", "состояние общее");
@@ -414,7 +431,7 @@ test("общее состояние: второй поток не пробует
   // Статистика причин тоже общая, а не перезаписывается.
   const summary = readerB.fallbackSummary();
   const total = summary.reduce((acc, x) => acc + x.count, 0);
-  assert.strictEqual(total, 2, "учтены пробы обоих потоков: " + JSON.stringify(summary));
+  assert.strictEqual(total, 1, "учтена проба первого потока: " + JSON.stringify(summary));
 });
 
 test("ни один уход на страницу не остаётся без причины", async () => {
@@ -510,12 +527,12 @@ test("периодическая сверка: каждый N-й объект п
     const r = await reader.read({ articleId: id });
     paths.push(r.path);
   }
-  assert.deepStrictEqual(paths.slice(0, 2), ["dom", "dom"], "две стартовые пробы");
+  assert.strictEqual(paths[0], "dom", "одна стартовая проба");
   assert.strictEqual(reader.getPhase("posting"), "on");
-  assert.ok(paths.slice(2).includes("api"), "основная масса читается через API");
-  const verifyReads = paths.slice(2).filter((p) => p === "dom").length;
+  assert.ok(paths.slice(1).includes("api"), "основная масса читается через API");
+  const verifyReads = paths.slice(1).filter((p) => p === "dom").length;
   assert.ok(verifyReads >= 1, "контрольные сверки со страницей происходят");
-  assert.ok(verifyReads < paths.length - 2, "но это не каждый объект");
+  assert.ok(verifyReads < paths.length - 1, "но это не каждый объект");
 });
 
 test("постоянный 401 на пробах не крутит переучивание бесконечно", async () => {
@@ -535,6 +552,56 @@ test("постоянный 401 на пробах не крутит переуч�
   await reader.read({ articleId: ids[0] });
   assert.strictEqual(reader.getPhase("resolve"), "off", "разрешение типа отключено");
   assert.ok(state.relearnCalls <= 3, "переучивание не повторяется на каждый объект");
+});
+
+test("объект «в пути»: наш склад находится в последней перевозке, как в DOM", async () => {
+  // Текущее место — чужой склад, но последняя перевозка идёт к нам: страница
+  // такой объект относит к нашему складу, значит и API обязан.
+  const ids = ["501883634205800", "501883634205801", "501883634205802"];
+  const infos = {};
+  const contents = {};
+  const carriages = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id, { currentWarehouseName: "ЛЮБЛИНО_АППЗ_1" });
+    contents[id] = postingContent;
+    carriages[id] = {
+      sourcePlaceName: "ЛЮБЛИНО_АППЗ_1",
+      destinationPlaceName: "МО_ИСТРА_ДО",
+      isCompleted: false,
+    };
+  });
+  const ops = ["МО_ИСТРА_ДО"];
+  const { deps } = makeDriver({ infos, contents, carriages, opsWarehouses: ops });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, opsWarehouses: ops });
+
+  const probe = await reader.read({ articleId: ids[0] });
+  assert.strictEqual(probe.path, "dom");
+  assert.strictEqual(reader.getPhase("posting"), "on", "сверка сошлась, тип включён");
+
+  const r = await reader.read({ articleId: ids[1] });
+  assert.strictEqual(r.path, "api");
+  assert.strictEqual(r.data.operationalWarehouse, "МО_ИСТРА_ДО", "склад взят из перевозки");
+  assert.strictEqual(r.data.operationalWarehouseSeen, true);
+});
+
+test("перевозка не запрашивается, когда текущее место и так наше", async () => {
+  const ids = ["501883634205900", "501883634205901"];
+  const infos = {};
+  const contents = {};
+  ids.forEach((id) => {
+    infos[id] = postingInfo(id, { currentWarehouseName: "МО_ИСТРА_ДО" });
+    contents[id] = postingContent;
+  });
+  const ops = ["МО_ИСТРА_ДО"];
+  const { state, deps } = makeDriver({ infos, contents, opsWarehouses: ops });
+  const reader = R.createHubApiReader(deps, { verifyEveryN: 0, opsWarehouses: ops });
+  await reader.read({ articleId: ids[0] });
+  state.urls.length = 0;
+  await reader.read({ articleId: ids[1] });
+  assert.ok(
+    !state.urls.some((u) => u.includes("last-carriage")),
+    "лишнего запроса нет: " + JSON.stringify(state.urls)
+  );
 });
 
 test("неизвестный код статуса → объект читается страницей, тип не ломается", async () => {
