@@ -176,9 +176,22 @@ test("пейсер: 429 роняет скорость вдвое и ставит
   assert.strictEqual(pacer.getRate(), 20);
   pacer.report({ status: 500 });
   assert.strictEqual(pacer.getRate(), 10);
-  pacer.report({ status: 0 }, "обрыв тоже считается отказом");
+  pacer.report({ status: 502 });
   assert.strictEqual(pacer.getRate(), 10, "ниже пола не опускаемся");
   assert.strictEqual(pacer.stats().throttles, 4);
+});
+
+test("пейсер: наш собственный обрыв не роняет скорость, но и не разгоняет", async () => {
+  const pacer = M.createRequestPacer(40, { maxRps: 200, stepUpRps: 10, okBeforeStepUp: 2 });
+  pacer.report({ status: 200, ms: 30 });
+  // Запрос вообще не ушёл — сервис об этом ничего не сказал.
+  pacer.report({ status: 0 });
+  assert.strictEqual(pacer.getRate(), 40, "скорость не тронута");
+  assert.strictEqual(pacer.stats().throttles, 0, "это не отказ сервиса");
+  pacer.report({ status: 200, ms: 30 });
+  assert.strictEqual(pacer.getRate(), 40, "разгон начинается заново, а не продолжается");
+  pacer.report({ status: 200, ms: 30 });
+  assert.strictEqual(pacer.getRate(), 50);
 });
 
 test("пейсер: на чистых ответах планка растёт до потолка и не выше", async () => {
